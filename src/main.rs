@@ -1,6 +1,10 @@
+use std::net::{Ipv4Addr, SocketAddrV4};
+
 use clap::Parser;
 use error::BitTorrentError;
+use handshake::{HandshakeMessage, send_handshake};
 use info::read_metainfo;
+use regex::Regex;
 use tracker::query_tracker;
 
 use crate::{decode::Decoder, util::bytes_to_hex};
@@ -8,6 +12,7 @@ use crate::{decode::Decoder, util::bytes_to_hex};
 mod decode;
 mod encode;
 mod error;
+mod handshake;
 mod info;
 mod tracker;
 mod util;
@@ -24,6 +29,7 @@ enum Subcommand {
     Decode(DecodeArgs),
     Info(InfoArgs),
     Peers(PeersArgs),
+    Handshake(HandshakeArgs),
 }
 
 #[derive(Parser)]
@@ -37,14 +43,14 @@ struct DecodeArgs {
 struct InfoArgs {
     /// File with torrent information
     #[arg(required = true)]
-    file: String,
+    torrent_file: String,
 }
 
 #[derive(Parser)]
 struct PeersArgs {
     /// File with torrent information
     #[arg(required = true)]
-    file: String,
+    torrent_file: String,
 
     /// Peer ID for GET request
     #[arg(short, long, default_value = "00112233445566778899")]
@@ -55,9 +61,51 @@ struct PeersArgs {
     port: u16,
 }
 
+#[derive(Parser)]
+struct HandshakeArgs {
+    /// File with torrent information
+    #[arg(required = true)]
+    torrent_file: String,
+
+    /// IP & Port of peer to connect to
+    #[clap(required = true, value_parser = peer_validator)]
+    peer: SocketAddrV4,
+
+    /// Peer ID for handshake
+    #[arg(short, long, default_value = "00112233445566778899")]
+    peer_id: String,
+}
+
+fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
+    let port_ip_re = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
+    match port_ip_re.captures(val) {
+        None => Err("Invalid ip:port format specified".to_string()),
+        Some(captures) => {
+            let ip_parts = (1..=4)
+                .map(|i| {
+                    captures
+                        .get(i)
+                        .unwrap()
+                        .as_str()
+                        .parse()
+                        .map_err(|_| format!("IP part {} not in the range 0-255", i))
+                })
+                .collect::<Result<Vec<u8>, String>>()?;
+            Ok(SocketAddrV4::new(
+                Ipv4Addr::new(ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]),
+                captures
+                    .get(5)
+                    .unwrap()
+                    .as_str()
+                    .parse()
+                    .map_err(|_| "Port not in the range 0-65535")?,
+            ))
+        }
+    }
+}
+
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "decode", "lli4eei5ee"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
@@ -66,7 +114,7 @@ fn main() -> Result<(), BitTorrentError> {
             println!("{}", decoded);
         }
         Subcommand::Info(info_args) => {
-            let meta_info = read_metainfo(&info_args.file)?;
+            let meta_info = read_metainfo(&info_args.torrent_file)?;
             let info_hash = meta_info.info.hash()?;
             println!("Tracker URL: {}", meta_info.announce);
             println!("Length: {}", meta_info.info.length);
@@ -78,11 +126,17 @@ fn main() -> Result<(), BitTorrentError> {
             }
         }
         Subcommand::Peers(peers_args) => {
-            let meta_info = read_metainfo(&peers_args.file)?;
+            let meta_info = read_metainfo(&peers_args.torrent_file)?;
             let tracker_info = query_tracker(&meta_info, &peers_args.peer_id, peers_args.port)?;
-            for (ip, port) in tracker_info.peers()? {
-                println!("{}:{}", ip, port);
+            for sock in tracker_info.peers()? {
+                println!("{}", sock);
             }
+        }
+        Subcommand::Handshake(handshake_args) => {
+            let meta_info = read_metainfo(&handshake_args.torrent_file)?;
+            let message = HandshakeMessage::new(&meta_info, &handshake_args.peer_id)?;
+            let response = send_handshake(&handshake_args.peer, &message)?;
+            println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
         }
     }
     Ok(())

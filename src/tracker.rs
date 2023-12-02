@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, str::from_utf8};
+use std::{net::{Ipv4Addr, SocketAddrV4}, str::from_utf8};
 
 use serde::Deserialize;
 
@@ -27,12 +27,12 @@ pub struct FailureTrackerResponse {
 }
 
 impl SuccessfulTrackerResponse {
-    pub fn peers(&self) -> Result<Vec<(Ipv4Addr, u16)>, BitTorrentError> {
+    pub fn peers(&self) -> Result<Vec<SocketAddrV4>, BitTorrentError> {
         Ok(encode_maybe_b64_string(&self.peers)?
             .to_vec()
             .chunks(6)
             .map(|chunk| {
-                (
+                SocketAddrV4::new(
                     Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
                     ((chunk[4] as u16) << 8) + (chunk[5] as u16),
                 )
@@ -41,7 +41,7 @@ impl SuccessfulTrackerResponse {
     }
 }
 
-fn querystring_encode(bytes: &[u8]) -> String {
+pub fn querystring_encode(bytes: &[u8]) -> String {
     bytes
         .iter()
         .map(|byte| {
