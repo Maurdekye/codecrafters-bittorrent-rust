@@ -1,11 +1,39 @@
 use crate::{bterror, error::BitTorrentError};
 use regex::Regex;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentError> {
     let string_length_re = Regex::new(r"^(\d+):").unwrap();
     let integer_re = Regex::new(r"^i(-?\d+)e").unwrap();
     match data_stream.chars().next() {
+
+        // decode dictionary
+        Some('d') => {
+            *data_stream = &data_stream[1..];
+            let mut dict: Map<String, Value> = Map::new();
+            loop {
+                match data_stream.chars().next() {
+                    Some('e') => {
+                        *data_stream = &data_stream[1..];
+                        break;
+                    }
+                    None => {
+                        return Err(bterror!(
+                            "Error parsing encoded dictionary: ending delimiter missing"
+                        ))
+                    }
+                    _ => {
+                        let first_item = consume_bencoded_value(data_stream)?;
+                        let key = first_item
+                            .as_str()
+                            .ok_or(bterror!("Key element is not a string"))?;
+                        let value = consume_bencoded_value(data_stream)?;
+                        dict.insert(key.to_string(), value);
+                    }
+                }
+            }
+            Ok(Value::Object(dict))
+        }
 
         // decode list
         Some('l') => {
@@ -15,14 +43,18 @@ fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentErr
                 match data_stream.chars().next() {
                     Some('e') => {
                         *data_stream = &data_stream[1..];
-                        break
-                    },
-                    None => return Err(bterror!("Error parsing encoded list: ending delimiter missing")),
-                    _ => list.push(consume_bencoded_value(data_stream)?)
+                        break;
+                    }
+                    None => {
+                        return Err(bterror!(
+                            "Error parsing encoded list: ending delimiter missing"
+                        ))
+                    }
+                    _ => list.push(consume_bencoded_value(data_stream)?),
                 }
             }
             Ok(Value::Array(list))
-        },
+        }
 
         // decode integer
         Some('i') => {
@@ -45,7 +77,6 @@ fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentErr
             Ok(Value::Number(integer.into()))
         }
         Some(c) => {
-
             // decode string
             if c.is_numeric() {
                 let captures = string_length_re
@@ -63,12 +94,16 @@ fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentErr
                     .end();
                 let content_end = content_start + length;
                 if content_end > data_stream.len() {
-                    Err(bterror!("Content length too long: requested {} chars, stream only has {} chars", content_end, data_stream.len()))
+                    Err(bterror!(
+                        "Content length too long: requested {} chars, stream only has {} chars",
+                        content_end,
+                        data_stream.len()
+                    ))
                 } else {
                     let content = &data_stream[content_start..content_end];
-    
+
                     *data_stream = &data_stream[content_end..];
-    
+
                     Ok(Value::String(content.to_string()))
                 }
             } else {
