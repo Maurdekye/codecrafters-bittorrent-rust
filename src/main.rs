@@ -1,10 +1,12 @@
 use clap::Parser;
 use error::BitTorrentError;
+use info::read_metainfo;
 
-use crate::decode::decode_bencoded_value;
+use crate::decode::Decoder;
 
 mod decode;
 mod error;
+mod info;
 
 #[derive(Parser)]
 #[clap(about, version)]
@@ -16,6 +18,7 @@ struct Args {
 #[derive(Parser)]
 enum Subcommands {
     Decode(DecodeArgs),
+    Info(InfoArgs),
 }
 
 #[derive(Parser)]
@@ -25,6 +28,13 @@ struct DecodeArgs {
     raw_content: String,
 }
 
+#[derive(Parser)]
+struct InfoArgs {
+    /// String to decode
+    #[arg(required = true)]
+    file: String,
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
@@ -32,10 +42,14 @@ fn main() -> Result<(), BitTorrentError> {
 
     match args.command {
         Subcommands::Decode(decode_args) => {
-            println!(
-                "{}",
-                decode_bencoded_value(decode_args.raw_content.as_str())?
-            );
+            let mut content = decode_args.raw_content.as_bytes();
+            let decoded = Decoder::new().consume_bencoded_value(&mut content)?;
+            println!("{}", decoded);
+        }
+        Subcommands::Info(info_args) => {
+            let meta_info = read_metainfo(&info_args.file)?;
+            println!("Tracker URL: {}", meta_info.announce);
+            println!("Length: {}", meta_info.info.length);
         }
     }
     Ok(())
