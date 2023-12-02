@@ -13,7 +13,10 @@ fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentErr
             let mut list: Vec<Value> = Vec::new();
             loop {
                 match data_stream.chars().next() {
-                    Some('e') => break,
+                    Some('e') => {
+                        *data_stream = &data_stream[1..];
+                        break
+                    },
                     None => return Err(bterror!("Error parsing encoded list: ending delimiter missing")),
                     _ => list.push(consume_bencoded_value(data_stream)?)
                 }

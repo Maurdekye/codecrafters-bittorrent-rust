@@ -28,6 +28,7 @@ struct DecodeArgs {
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
+    // let args = Args::parse_from(["_", "decode", "lli4eei5ee"]);
 
     match args.command {
         Subcommands::Decode(decode_args) => {
