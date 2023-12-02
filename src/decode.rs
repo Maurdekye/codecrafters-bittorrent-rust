@@ -2,51 +2,81 @@ use crate::{bterror, error::BitTorrentError};
 use regex::Regex;
 use serde_json::Value;
 
-pub fn decode_bencoded_value(raw_value: &str) -> Result<Value, BitTorrentError> {
-    let decode_string_re = Regex::new(r"^(\d+):(.*)$")
-        .expect("String decode regex did not compile (for some reason??)");
-    let decode_integer_re = Regex::new(r"^i(-?\d+)e$")
-        .expect("Integer decode regex did not compile (for some reason??)");
+fn consume_bencoded_value(data_stream: &mut &str) -> Result<Value, BitTorrentError> {
+    let string_length_re = Regex::new(r"^(\d+):").unwrap();
+    let integer_re = Regex::new(r"^i(-?\d+)e").unwrap();
+    match data_stream.chars().next() {
 
-    match (
-        decode_string_re.captures(raw_value),
-        decode_integer_re.captures(raw_value),
-    ) {
-        // decode string
-        (Some(captures), _) => {
-            let passed_length: usize = captures
-                .get(1)
-                .ok_or(bterror!("length specifier not present"))?
-                .as_str()
-                .parse()
-                .map_err(|err| bterror!("Error parsing encoded string length: {}", err))?;
-            let content = captures
-                .get(2)
-                .ok_or(bterror!("Content not present"))?
-                .as_str();
-            if passed_length != content.len() {
-                Err(bterror!(
-                    "Mismatched content length: parsed length {}, actual length {}",
-                    passed_length,
-                    content.len()
-                ))
-            } else {
-                Ok(Value::String(content.to_string()))
+        // decode list
+        Some('l') => {
+            *data_stream = &data_stream[1..];
+            let mut list: Vec<Value> = Vec::new();
+            loop {
+                match data_stream.chars().next() {
+                    Some('e') => break,
+                    None => return Err(bterror!("Error parsing encoded list: ending delimiter missing")),
+                    _ => list.push(consume_bencoded_value(data_stream)?)
+                }
             }
-        }
-        
+            Ok(Value::Array(list))
+        },
+
         // decode integer
-        (_, Some(captures)) => {
-            let value: i64 = captures
+        Some('i') => {
+            let captures = integer_re
+                .captures(&data_stream)
+                .ok_or(bterror!("Error parsing encoded integer"))?;
+            let integer: i64 = captures
                 .get(1)
-                .ok_or(bterror!("value not present"))?
+                .ok_or(bterror!("Integer not present"))?
                 .as_str()
                 .parse()
                 .map_err(|err| bterror!("Error parsing encoded integer: {}", err))?;
-            Ok(Value::Number(value.into()))
-        }
+            let content_end = captures
+                .get(0)
+                .ok_or(bterror!("Error parsing encoded integer chars"))?
+                .end();
 
-        // unrecognized value
-        _ => Err(bterror!("Unhandled encoded value: {}", raw_value)),
+            *data_stream = &data_stream[content_end..];
+
+            Ok(Value::Number(integer.into()))
+        }
+        Some(c) => {
+
+            // decode string
+            if c.is_numeric() {
+                let captures = string_length_re
+                    .captures(&data_stream)
+                    .ok_or(bterror!("Error parsing encoded string length"))?;
+                let length: usize = captures
+                    .get(1)
+                    .ok_or(bterror!("String length not present"))?
+                    .as_str()
+                    .parse()
+                    .map_err(|err| bterror!("Error parsing encoded string length: {}", err))?;
+                let content_start = captures
+                    .get(0)
+                    .ok_or(bterror!("Error parsing encoded string"))?
+                    .end();
+                let content_end = content_start + length;
+                if content_end > data_stream.len() {
+                    Err(bterror!("Content length too long: requested {} chars, stream only has {} chars", content_end, data_stream.len()))
+                } else {
+                    let content = &data_stream[content_start..content_end];
+    
+                    *data_stream = &data_stream[content_end..];
+    
+                    Ok(Value::String(content.to_string()))
+                }
+            } else {
+                Err(bterror!("Unhandled encoded value: {}", data_stream))
+            }
+        }
+        None => Err(bterror!("Unhandled encoded value: {}", data_stream)),
     }
+}
+
+pub fn decode_bencoded_value(raw_value: &str) -> Result<Value, BitTorrentError> {
+    let mut stream = raw_value;
+    consume_bencoded_value(&mut stream)
 }
