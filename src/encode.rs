@@ -3,17 +3,21 @@ use serde_json::Value;
 
 use crate::{bterror, error::BitTorrentError};
 
+pub fn encode_maybe_b64_string(string: &String) -> Result<Vec<u8>, BitTorrentError> {
+    Ok(if string.starts_with("base64:") {
+        general_purpose::STANDARD_NO_PAD
+            .decode(&string[7..])
+            .map_err(|err| bterror!("Error decoding base64 for string value: {}", err))?
+    } else {
+        string.bytes().collect()
+    })
+}
+
 pub fn bencode_value(value: Value) -> Result<Vec<u8>, BitTorrentError> {
     match value {
         Value::Number(number) => Ok(format!("i{}e", number).as_bytes().to_vec()),
         Value::String(string) => {
-            let bytes = if string.starts_with("base64:") {
-                general_purpose::STANDARD_NO_PAD
-                    .decode(&string[7..])
-                    .map_err(|err| bterror!("Error decoding base64 for string value: {}", err))?
-            } else {
-                string.bytes().collect()
-            };
+            let bytes = encode_maybe_b64_string(&string)?;
             let length_prefix: Vec<u8> = format!("{}:", bytes.len()).bytes().collect();
             Ok(length_prefix.into_iter().chain(bytes).collect())
         }

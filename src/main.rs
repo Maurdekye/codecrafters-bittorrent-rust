@@ -2,12 +2,13 @@ use clap::Parser;
 use error::BitTorrentError;
 use info::read_metainfo;
 
-use crate::decode::Decoder;
+use crate::{decode::Decoder, util::bytes_to_hex};
 
 mod encode;
 mod decode;
 mod error;
 mod info;
+mod util;
 
 #[derive(Parser)]
 #[clap(about, version)]
@@ -31,7 +32,7 @@ struct DecodeArgs {
 
 #[derive(Parser)]
 struct InfoArgs {
-    /// String to decode
+    /// File to load
     #[arg(required = true)]
     file: String,
 }
@@ -50,10 +51,14 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommands::Info(info_args) => {
             let meta_info = read_metainfo(&info_args.file)?;
             let info_hash = meta_info.info.hash()?;
-            let readable_hash: String = info_hash.iter().map(|byte| format!("{:02x}", byte)).collect();
             println!("Tracker URL: {}", meta_info.announce);
             println!("Length: {}", meta_info.info.length);
-            println!("Info Hash: {}", readable_hash);
+            println!("Info Hash: {}", bytes_to_hex(&info_hash));
+            println!("Piece Length: {}", meta_info.info.piece_length);
+            println!("Piece Hashes:");
+            for hash in meta_info.info.pieces()? {
+                println!("{}", bytes_to_hex(&hash));
+            }
         }
     }
     Ok(())

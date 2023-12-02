@@ -1,6 +1,11 @@
 use std::fs;
 
-use crate::{bterror, decode::Decoder, encode::bencode_value, error::BitTorrentError};
+use crate::{
+    bterror,
+    decode::Decoder,
+    encode::{bencode_value, encode_maybe_b64_string},
+    error::BitTorrentError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, to_value};
 use sha1::{Digest, Sha1};
@@ -17,7 +22,7 @@ pub struct Info {
     pub name: String,
     #[serde(rename = "piece length")]
     pub piece_length: usize,
-    pub pieces: String,
+    pieces: String,
 }
 
 impl Info {
@@ -28,6 +33,14 @@ impl Info {
         let mut hasher = Sha1::new();
         hasher.update(bencoded);
         Ok(hasher.finalize().to_vec())
+    }
+
+    pub fn pieces(&self) -> Result<Vec<Vec<u8>>, BitTorrentError> {
+        Ok(encode_maybe_b64_string(&self.pieces)?
+            .to_vec()
+            .chunks(20)
+            .map(|chunk| chunk.to_vec())
+            .collect())
     }
 }
 
