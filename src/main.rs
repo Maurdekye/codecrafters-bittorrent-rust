@@ -4,6 +4,7 @@ use info::read_metainfo;
 
 use crate::decode::Decoder;
 
+mod encode;
 mod decode;
 mod error;
 mod info;
@@ -48,8 +49,11 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommands::Info(info_args) => {
             let meta_info = read_metainfo(&info_args.file)?;
+            let info_hash = meta_info.info.hash()?;
+            let readable_hash: String = info_hash.iter().map(|byte| format!("{:02x}", byte)).collect();
             println!("Tracker URL: {}", meta_info.announce);
             println!("Length: {}", meta_info.info.length);
+            println!("Info Hash: {}", readable_hash);
         }
     }
     Ok(())

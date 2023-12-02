@@ -1,4 +1,5 @@
 use crate::{bterror, error::BitTorrentError};
+use base64::{engine::general_purpose, Engine};
 use regex::bytes::Regex;
 use serde_json::{Map, Value};
 use std::str::from_utf8;
@@ -113,8 +114,10 @@ impl Decoder {
                 data_stream.len()
             ))
         } else {
-            let content =
-                String::from_utf8_lossy(&data_stream[content_start..content_end]).to_string();
+            let bytes = &data_stream[content_start..content_end];
+            let content = from_utf8(bytes)
+                .map(String::from)
+                .unwrap_or_else(|_| format!("base64:{}", general_purpose::STANDARD_NO_PAD.encode(bytes)));
 
             *data_stream = &data_stream[content_end..];
 
