@@ -13,6 +13,7 @@ use tracker::query_tracker;
 
 use crate::{
     decode::Decoder,
+    download::download_file,
     util::{bytes_to_hex, sha1_hash},
 };
 
@@ -40,6 +41,7 @@ enum Subcommand {
     Handshake(HandshakeArgs),
     #[command(name = "download_piece")]
     DownloadPiece(DownloadPieceArgs),
+    Download(DownloadArgs),
 }
 
 #[derive(Parser)]
@@ -99,6 +101,25 @@ struct DownloadPieceArgs {
     /// Piece to download
     #[arg(required = true)]
     piece_id: usize,
+
+    /// Output file location
+    #[arg(short, long)]
+    output: String,
+
+    /// Peer ID for handshake
+    #[arg(short = 'i', long, default_value = "00112233445566778899")]
+    peer_id: String,
+
+    /// Port for handshake
+    #[arg(short, long, default_value_t = 6881)]
+    port: u16,
+}
+
+#[derive(Parser)]
+struct DownloadArgs {
+    /// File with torrent information
+    #[arg(required = true)]
+    torrent_file: String,
 
     /// Output file location
     #[arg(short, long)]
@@ -186,20 +207,21 @@ fn main() -> Result<(), BitTorrentError> {
                 &download_piece_args.peer_id,
                 download_piece_args.port,
             )?;
-            let hash = sha1_hash(&data);
-            let check_hash = meta_info.info.pieces()?[download_piece_args.piece_id];
-            if hash != check_hash {
-                return Err(bterror!(
-                    "Piece hash mismatch: meta info hash: {}, actual hash: {}",
-                    bytes_to_hex(&check_hash),
-                    bytes_to_hex(&hash)
-                ));
-            }
             fs::write(&download_piece_args.output, data)
                 .map_err(|err| bterror!("Error writing to disk: {}", err))?;
             println!(
                 "Piece {} downloaded to {}.",
                 download_piece_args.piece_id, &download_piece_args.output
+            );
+        }
+        Subcommand::Download(download_args) => {
+            let meta_info = read_metainfo(&download_args.torrent_file)?;
+            let full_file = download_file(&meta_info, &download_args.peer_id, download_args.port)?;
+            fs::write(&download_args.output, full_file)
+                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
+            println!(
+                "Downloaded {} to {}.",
+                download_args.torrent_file, &download_args.output
             );
         }
     }

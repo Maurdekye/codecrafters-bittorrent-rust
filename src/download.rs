@@ -9,7 +9,7 @@ use crate::{
     handshake::{send_handshake, HandshakeMessage},
     info::MetaInfo,
     tracker::query_tracker,
-    util::read_n_bytes,
+    util::{bytes_to_hex, read_n_bytes, sha1_hash},
 };
 
 const CHUNK_SIZE: u32 = 16384;
@@ -131,12 +131,12 @@ pub fn download_piece(
 
     // send requests
     let piece_offset = piece_id * meta_info.info.piece_length as u32;
-    let piece_size = (meta_info.info.length as u32 - piece_offset).min(meta_info.info.piece_length as u32);
+    let piece_size =
+        (meta_info.info.length as u32 - piece_offset).min(meta_info.info.piece_length as u32);
     let mut responses = (0..piece_size)
         .step_by(CHUNK_SIZE as usize)
         .map(|chunk_offset| {
-            let message_length =
-                (piece_size - chunk_offset).min(CHUNK_SIZE);
+            let message_length = (piece_size - chunk_offset).min(CHUNK_SIZE);
             send_peer_message(
                 &mut stream,
                 &PeerMessage::Request(RequestMessage {
@@ -160,8 +160,34 @@ pub fn download_piece(
 
     // coallate data
     responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
-    Ok(responses
+    let full_piece: Vec<u8> = responses
         .into_iter()
         .flat_map(|PieceMessage { block, .. }| block)
+        .collect();
+
+    // check hash
+    let hash = sha1_hash(&full_piece);
+    let check_hash = meta_info.info.pieces()?[piece_id as usize];
+    if hash != check_hash {
+        Err(bterror!(
+            "Piece hash mismatch: meta info hash: {}, actual hash: {}",
+            bytes_to_hex(&check_hash),
+            bytes_to_hex(&hash)
+        ))
+    } else {
+        Ok(full_piece)
+    }
+}
+
+pub fn download_file(
+    meta_info: &MetaInfo,
+    peer_id: &str,
+    port: u16,
+) -> Result<Vec<u8>, BitTorrentError> {
+    Ok((0..meta_info.info.pieces().unwrap().len())
+        .map(|piece_id| download_piece(&meta_info, piece_id as u32, &peer_id, port))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
         .collect())
 }
