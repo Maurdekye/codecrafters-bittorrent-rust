@@ -1,4 +1,5 @@
 use std::{net::TcpStream, io::Read};
+use sha1::{Digest, Sha1};
 
 use crate::{error::BitTorrentError, bterror};
 
@@ -17,4 +18,10 @@ pub fn read_n_bytes(stream: &mut TcpStream, mut n: usize) -> Result<Vec<u8>, Bit
         n -= num_read;
     }
     Ok(bytes)
+}
+
+pub fn sha1_hash(bytes: &[u8]) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
 }

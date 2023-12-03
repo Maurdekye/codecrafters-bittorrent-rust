@@ -4,11 +4,10 @@ use crate::{
     bterror,
     decode::Decoder,
     encode::{bencode_value, encode_maybe_b64_string},
-    error::BitTorrentError,
+    error::BitTorrentError, util::sha1_hash,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, to_value};
-use sha1::{Digest, Sha1};
 
 #[derive(Deserialize, Debug)]
 pub struct MetaInfo {
@@ -26,20 +25,18 @@ pub struct Info {
 }
 
 impl Info {
-    pub fn hash(&self) -> Result<Vec<u8>, BitTorrentError> {
+    pub fn hash(&self) -> Result<[u8; 20], BitTorrentError> {
         let as_object =
             to_value(self).map_err(|err| bterror!("Unable to bencode info dict: {}", err))?;
         let bencoded = bencode_value(as_object)?;
-        let mut hasher = Sha1::new();
-        hasher.update(bencoded);
-        Ok(hasher.finalize().to_vec())
+        Ok(sha1_hash(&bencoded))
     }
 
-    pub fn pieces(&self) -> Result<Vec<Vec<u8>>, BitTorrentError> {
+    pub fn pieces(&self) -> Result<Vec<[u8; 20]>, BitTorrentError> {
         Ok(encode_maybe_b64_string(&self.pieces)?
             .to_vec()
             .chunks(20)
-            .map(|chunk| chunk.to_vec())
+            .map(|chunk| chunk.try_into().unwrap())
             .collect())
     }
 }

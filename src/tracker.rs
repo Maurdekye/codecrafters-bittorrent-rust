@@ -34,7 +34,7 @@ impl SuccessfulTrackerResponse {
             .map(|chunk| {
                 SocketAddrV4::new(
                     Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
-                    u16::from_ne_bytes([chunk[4], chunk[5]])
+                    u16::from_be_bytes([chunk[4], chunk[5]])
                 )
             })
             .collect())

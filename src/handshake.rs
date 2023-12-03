@@ -5,7 +5,7 @@ use crate::{bterror, error::BitTorrentError, info::MetaInfo, util::read_n_bytes}
 
 #[derive(Debug)]
 pub struct HandshakeMessage {
-    pub info_hash: Vec<u8>,
+    pub info_hash: [u8; 20],
     pub peer_id: Vec<u8>,
 }
 
@@ -19,11 +19,10 @@ impl HandshakeMessage {
 
     fn decode(bytes: &[u8]) -> Result<HandshakeMessage, BitTorrentError> {
         Ok(HandshakeMessage {
-            info_hash: bytes[28..48].into(),
-            peer_id: bytes[48..68].into()
+            info_hash: bytes[28..48].try_into().unwrap(),
+            peer_id: bytes[48..68].into(),
         })
     }
-
 
     fn encode(&self) -> Vec<u8> {
         [19u8]

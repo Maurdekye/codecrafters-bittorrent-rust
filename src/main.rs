@@ -11,7 +11,10 @@ use info::read_metainfo;
 use regex::Regex;
 use tracker::query_tracker;
 
-use crate::{decode::Decoder, util::bytes_to_hex};
+use crate::{
+    decode::Decoder,
+    util::{bytes_to_hex, sha1_hash},
+};
 
 mod decode;
 mod download;
@@ -140,7 +143,7 @@ fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "download_piece", "-o", "/tmp/test-piece-0", "sample.torrent", "0"]);
+    // let args = Args::parse_from(["_", "download_piece", "-o", "test-piece-2", "sample.torrent", "2"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
@@ -179,10 +182,19 @@ fn main() -> Result<(), BitTorrentError> {
             let meta_info = read_metainfo(&download_piece_args.torrent_file)?;
             let data = download_piece(
                 &meta_info,
-                download_piece_args.piece_id,
+                download_piece_args.piece_id as u32,
                 &download_piece_args.peer_id,
                 download_piece_args.port,
             )?;
+            let hash = sha1_hash(&data);
+            let check_hash = meta_info.info.pieces()?[download_piece_args.piece_id];
+            if hash != check_hash {
+                return Err(bterror!(
+                    "Piece hash mismatch: meta info hash: {}, actual hash: {}",
+                    bytes_to_hex(&check_hash),
+                    bytes_to_hex(&hash)
+                ));
+            }
             fs::write(&download_piece_args.output, data)
                 .map_err(|err| bterror!("Error writing to disk: {}", err))?;
             println!(

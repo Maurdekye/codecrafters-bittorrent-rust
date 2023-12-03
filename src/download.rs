@@ -3,11 +3,8 @@ use std::net::TcpStream;
 
 use serde::{Deserialize, Serialize};
 
-use crate::encode::encode_maybe_b64_string;
 use crate::{
     bterror,
-    decode::Decoder,
-    encode::bencode_value,
     error::BitTorrentError,
     handshake::{send_handshake, HandshakeMessage},
     info::MetaInfo,
@@ -15,7 +12,7 @@ use crate::{
     util::read_n_bytes,
 };
 
-const CHUNK_SIZE: usize = 16384;
+const CHUNK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
 enum PeerMessage {
@@ -28,16 +25,16 @@ enum PeerMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RequestMessage {
-    index: usize,
-    begin: usize,
-    length: usize,
+    index: u32,
+    begin: u32,
+    length: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct PieceMessage {
-    index: usize,
-    begin: usize,
-    block: String,
+    index: u32,
+    begin: u32,
+    block: Vec<u8>,
 }
 
 impl PeerMessage {
@@ -46,14 +43,16 @@ impl PeerMessage {
             Some(5u8) => Ok(Self::Bitfield),
             Some(2u8) => Ok(Self::Interested),
             Some(1u8) => Ok(Self::Unchoke),
-            Some(6u8) => Ok(Self::Request(
-                serde_json::from_value(Decoder::new().consume_bencoded_value(&mut &bytes[1..])?)
-                    .map_err(|err| bterror!("Error decoding request peer message: {}", err))?,
-            )),
-            Some(7u8) => Ok(Self::Piece(
-                serde_json::from_value(Decoder::new().consume_bencoded_value(&mut &bytes[1..])?)
-                    .map_err(|err| bterror!("Error decoding piece peer message: {}", err))?,
-            )),
+            Some(6u8) => Ok(Self::Request(RequestMessage {
+                index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
+                begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
+                length: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
+            })),
+            Some(7u8) => Ok(Self::Piece(PieceMessage {
+                index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
+                begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
+                block: bytes[9..].to_vec(),
+            })),
             _ => Err(bterror!("Invalid peer message")),
         }
     }
@@ -65,15 +64,15 @@ impl PeerMessage {
             Self::Unchoke => vec![1],
             Self::Request(req) => vec![6]
                 .into_iter()
-                .chain(bencode_value(serde_json::to_value(req).map_err(
-                    |err| bterror!("Error converting request peer message to json: {}", err),
-                )?)?)
+                .chain(req.index.to_be_bytes())
+                .chain(req.begin.to_be_bytes())
+                .chain(req.length.to_be_bytes())
                 .collect(),
             Self::Piece(piece) => vec![7]
                 .into_iter()
-                .chain(bencode_value(serde_json::to_value(piece).map_err(
-                    |err| bterror!("Error converting piece peer message to json: {}", err),
-                )?)?)
+                .chain(piece.index.to_be_bytes())
+                .chain(piece.begin.to_be_bytes())
+                .chain(piece.block.clone())
                 .collect(),
         };
         let length = base_message.len() as u32;
@@ -87,13 +86,13 @@ impl PeerMessage {
 
 fn await_peer_message(stream: &mut TcpStream) -> Result<PeerMessage, BitTorrentError> {
     let buf = read_n_bytes(stream, 4)?;
-    let length = u32::from_ne_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
+    let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
     let buf = read_n_bytes(stream, length as usize)?;
     PeerMessage::decode(&buf)
 }
 
 fn send_peer_message(stream: &mut TcpStream, message: &PeerMessage) -> Result<(), BitTorrentError> {
-    let _ = stream
+    stream
         .write(&message.encode()?)
         .map_err(|err| bterror!("Error sending peer message: {}", err))?;
     Ok(())
@@ -101,7 +100,7 @@ fn send_peer_message(stream: &mut TcpStream, message: &PeerMessage) -> Result<()
 
 pub fn download_piece(
     meta_info: &MetaInfo,
-    piece_id: usize,
+    piece_id: u32,
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
@@ -113,9 +112,7 @@ pub fn download_piece(
         TcpStream::connect(peer).map_err(|err| bterror!("Error connecting to peer: {}", err))?;
 
     // send handshake
-    let _ =
-        send_handshake(&mut stream, &HandshakeMessage::new(&meta_info, &peer_id)?)?;
-    // dbg!(handshake_response);
+    send_handshake(&mut stream, &HandshakeMessage::new(&meta_info, &peer_id)?)?;
 
     // wait for bitfield
     match await_peer_message(&mut stream)? {
@@ -133,10 +130,13 @@ pub fn download_piece(
     }
 
     // send requests
-    let mut responses = (0..meta_info.info.piece_length)
-        .step_by(CHUNK_SIZE)
+    let piece_offset = piece_id * meta_info.info.piece_length as u32;
+    let piece_size = (meta_info.info.length as u32 - piece_offset).min(meta_info.info.piece_length as u32);
+    let mut responses = (0..piece_size)
+        .step_by(CHUNK_SIZE as usize)
         .map(|chunk_offset| {
-            let message_length = (meta_info.info.piece_length - chunk_offset).min(CHUNK_SIZE);
+            let message_length =
+                (piece_size - chunk_offset).min(CHUNK_SIZE);
             send_peer_message(
                 &mut stream,
                 &PeerMessage::Request(RequestMessage {
@@ -145,7 +145,6 @@ pub fn download_piece(
                     length: message_length,
                 }),
             )?;
-            // dbg!(&chunk_offset);
             let piece_response = match await_peer_message(&mut stream)? {
                 PeerMessage::Piece(piece) => {
                     if piece.index != piece_id {
@@ -155,7 +154,6 @@ pub fn download_piece(
                 }
                 message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
             }?;
-            // dbg!(&piece_response);
             Ok(piece_response)
         })
         .collect::<Result<Vec<PieceMessage>, BitTorrentError>>()?;
@@ -164,9 +162,6 @@ pub fn download_piece(
     responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
     Ok(responses
         .into_iter()
-        .map(|PieceMessage { block, .. }| encode_maybe_b64_string(&block))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
+        .flat_map(|PieceMessage { block, .. }| block)
         .collect())
 }
