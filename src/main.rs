@@ -1,8 +1,12 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::{
+    fs,
+    net::{Ipv4Addr, SocketAddrV4, TcpStream},
+};
 
 use clap::Parser;
+use download::download_piece;
 use error::BitTorrentError;
-use handshake::{HandshakeMessage, send_handshake};
+use handshake::{send_handshake, HandshakeMessage};
 use info::read_metainfo;
 use regex::Regex;
 use tracker::query_tracker;
@@ -10,6 +14,7 @@ use tracker::query_tracker;
 use crate::{decode::Decoder, util::bytes_to_hex};
 
 mod decode;
+mod download;
 mod encode;
 mod error;
 mod handshake;
@@ -30,6 +35,8 @@ enum Subcommand {
     Info(InfoArgs),
     Peers(PeersArgs),
     Handshake(HandshakeArgs),
+    #[command(name = "download_piece")]
+    DownloadPiece(DownloadPieceArgs),
 }
 
 #[derive(Parser)]
@@ -72,8 +79,35 @@ struct HandshakeArgs {
     peer: SocketAddrV4,
 
     /// Peer ID for handshake
-    #[arg(short, long, default_value = "00112233445566778899")]
+    #[arg(short = 'i', long, default_value = "00112233445566778899")]
     peer_id: String,
+
+    /// Port for handshake
+    #[arg(short, long, default_value_t = 6881)]
+    port: u16,
+}
+
+#[derive(Parser)]
+struct DownloadPieceArgs {
+    /// File with torrent information
+    #[arg(required = true)]
+    torrent_file: String,
+
+    /// Piece to download
+    #[arg(required = true)]
+    piece_id: usize,
+
+    /// Output file location
+    #[arg(short, long)]
+    output: String,
+
+    /// Peer ID for handshake
+    #[arg(short = 'i', long, default_value = "00112233445566778899")]
+    peer_id: String,
+
+    /// Port for handshake
+    #[arg(short, long, default_value_t = 6881)]
+    port: u16,
 }
 
 fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
@@ -106,6 +140,7 @@ fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
+    // let args = Args::parse_from(["_", "download_piece", "-o", "/tmp/test-piece-0", "sample.torrent", "0"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
@@ -135,8 +170,25 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Handshake(handshake_args) => {
             let meta_info = read_metainfo(&handshake_args.torrent_file)?;
             let message = HandshakeMessage::new(&meta_info, &handshake_args.peer_id)?;
-            let response = send_handshake(&handshake_args.peer, &message)?;
+            let mut stream = TcpStream::connect(&handshake_args.peer)
+                .map_err(|err| bterror!("Error connecting to peer: {}", err))?;
+            let response = send_handshake(&mut stream, &message)?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
+        }
+        Subcommand::DownloadPiece(download_piece_args) => {
+            let meta_info = read_metainfo(&download_piece_args.torrent_file)?;
+            let data = download_piece(
+                &meta_info,
+                download_piece_args.piece_id,
+                &download_piece_args.peer_id,
+                download_piece_args.port,
+            )?;
+            fs::write(&download_piece_args.output, data)
+                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
+            println!(
+                "Piece {} downloaded to {}.",
+                download_piece_args.piece_id, &download_piece_args.output
+            );
         }
     }
     Ok(())

@@ -1,8 +1,9 @@
 use std::io::prelude::*;
-use std::net::{SocketAddrV4, TcpStream};
+use std::net::TcpStream;
 
-use crate::{bterror, error::BitTorrentError, info::MetaInfo};
+use crate::{bterror, error::BitTorrentError, info::MetaInfo, util::read_n_bytes};
 
+#[derive(Debug)]
 pub struct HandshakeMessage {
     pub info_hash: Vec<u8>,
     pub peer_id: Vec<u8>,
@@ -37,24 +38,12 @@ impl HandshakeMessage {
 }
 
 pub fn send_handshake(
-    peer: &SocketAddrV4,
+    stream: &mut TcpStream,
     message: &HandshakeMessage,
 ) -> Result<HandshakeMessage, BitTorrentError> {
-    let mut stream =
-        TcpStream::connect(peer).map_err(|err| bterror!("Error connecting to peer: {}", err))?;
     stream
         .write(&message.encode())
         .map_err(|err| bterror!("Unable to write to peer: {}", err))?;
-    let mut buf = [0u8; 68];
-    let n_bytes = stream
-        .read(&mut buf)
-        .map_err(|err| bterror!("Error reading peer response: {}", err))?;
-    if n_bytes < 68 {
-        Err(bterror!(
-            "Did not read enough bytes to construct a handshake message: need 68, only read {}",
-            n_bytes
-        ))
-    } else {
-        HandshakeMessage::decode(&buf)
-    }
+    let buf = read_n_bytes(stream, 68)?;
+    HandshakeMessage::decode(&buf)
 }
