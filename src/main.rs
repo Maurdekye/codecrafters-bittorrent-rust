@@ -4,7 +4,7 @@ use std::{
 };
 
 use clap::Parser;
-use download::download_piece;
+use download::download_piece_from_peer;
 use error::BitTorrentError;
 use handshake::{send_handshake, HandshakeMessage};
 use info::read_metainfo;
@@ -14,7 +14,7 @@ use tracker::query_tracker;
 use crate::{
     decode::Decoder,
     download::download_file,
-    util::{bytes_to_hex, sha1_hash},
+    util::bytes_to_hex,
 };
 
 mod decode;
@@ -201,7 +201,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DownloadPiece(download_piece_args) => {
             let meta_info = read_metainfo(&download_piece_args.torrent_file)?;
-            let data = download_piece(
+            let data = download_piece_from_peer(
                 &meta_info,
                 download_piece_args.piece_id as u32,
                 &download_piece_args.peer_id,

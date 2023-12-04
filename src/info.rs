@@ -9,13 +9,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, to_value};
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct MetaInfo {
     pub announce: String,
     pub info: Info,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Info {
     pub length: usize,
     pub name: String,

@@ -1,5 +1,7 @@
-use std::io::prelude::*;
-use std::net::TcpStream;
+use std::net::{SocketAddrV4, TcpStream};
+use std::sync::{mpsc, Mutex};
+use std::thread;
+use std::{io::prelude::*, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -98,16 +100,24 @@ fn send_peer_message(stream: &mut TcpStream, message: &PeerMessage) -> Result<()
     Ok(())
 }
 
-pub fn download_piece(
+pub fn download_piece_from_peer(
     meta_info: &MetaInfo,
     piece_id: u32,
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    // find peer
-    let tracker_response = query_tracker(&meta_info, peer_id, port)?;
+    let tracker_response = query_tracker(meta_info, peer_id, port)?;
     let peers = tracker_response.peers()?;
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
+    let mut stream = initialize_peer_connection(peer, meta_info, peer_id)?;
+    download_piece(&mut stream, meta_info, piece_id)
+}
+
+fn initialize_peer_connection(
+    peer: &SocketAddrV4,
+    meta_info: &MetaInfo,
+    peer_id: &str,
+) -> Result<TcpStream, BitTorrentError> {
     let mut stream =
         TcpStream::connect(peer).map_err(|err| bterror!("Error connecting to peer: {}", err))?;
 
@@ -129,34 +139,48 @@ pub fn download_piece(
         message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
     }
 
-    // send requests
+    Ok(stream)
+}
+
+fn download_piece(
+    stream: &mut TcpStream,
+    meta_info: &MetaInfo,
+    piece_id: u32,
+) -> Result<Vec<u8>, BitTorrentError> {
     let piece_offset = piece_id * meta_info.info.piece_length as u32;
     let piece_size =
         (meta_info.info.length as u32 - piece_offset).min(meta_info.info.piece_length as u32);
-    let mut responses = (0..piece_size)
+
+    // send requests
+    let num_pieces = (0..piece_size)
         .step_by(CHUNK_SIZE as usize)
         .map(|chunk_offset| {
             let message_length = (piece_size - chunk_offset).min(CHUNK_SIZE);
             send_peer_message(
-                &mut stream,
+                stream,
                 &PeerMessage::Request(RequestMessage {
                     index: piece_id,
                     begin: chunk_offset,
                     length: message_length,
                 }),
-            )?;
-            let piece_response = match await_peer_message(&mut stream)? {
-                PeerMessage::Piece(piece) => {
-                    if piece.index != piece_id {
-                        return Err(bterror!("Received piece with wrong index"));
-                    }
-                    Ok(piece)
-                }
-                message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
-            }?;
-            Ok(piece_response)
+            )
         })
-        .collect::<Result<Vec<PieceMessage>, BitTorrentError>>()?;
+        .collect::<Result<Vec<()>, BitTorrentError>>()?
+        .into_iter()
+        .count();
+
+    // collect pieces
+    let mut responses = (0..num_pieces)
+        .map(|_| match await_peer_message(stream)? {
+            PeerMessage::Piece(piece) => {
+                if piece.index != piece_id {
+                    return Err(bterror!("Received piece with wrong index"));
+                }
+                Ok(piece)
+            }
+            message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // coallate data
     responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
@@ -184,10 +208,63 @@ pub fn download_file(
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    Ok((0..meta_info.info.pieces().unwrap().len())
-        .map(|piece_id| download_piece(&meta_info, piece_id as u32, &peer_id, port))
-        .collect::<Result<Vec<_>, _>>()?
+    let tracker_response = query_tracker(&meta_info, peer_id, port)?;
+    let peers = tracker_response.peers()?;
+
+    let (worker_send, worker_recieve) = mpsc::channel();
+    let worker_send = Arc::new(Mutex::new(worker_send));
+    let worker_recieve = Arc::new(Mutex::new(worker_recieve));
+    let (master_send, master_recieve) = mpsc::channel();
+    let master_send = Arc::new(Mutex::new(master_send));
+
+    let num_pieces = meta_info.info.pieces().unwrap().len() as u32;
+
+    for piece_id in 0..num_pieces {
+        worker_send
+            .lock()
+            .unwrap()
+            .send(piece_id)
+            .map_err(|err| bterror!("Threading error submitting work: {}", err))?;
+    }
+
+    for peer in peers {
+        let worker_recieve = worker_recieve.clone();
+        let worker_send = worker_send.clone();
+        let master_send = master_send.clone();
+        let meta_info = meta_info.clone();
+        let peer_id = peer_id.to_string();
+        thread::spawn(move || {
+            let mut stream = initialize_peer_connection(&peer, &meta_info, &peer_id)?;
+
+            // wait for messages
+            loop {
+                let result = worker_recieve.lock().unwrap().recv();
+                match result {
+                    Ok(piece_id) => {
+                        let piece = download_piece(&mut stream, &meta_info, piece_id);
+                        match piece {
+                            Ok(piece) => master_send
+                                .lock()
+                                .unwrap()
+                                .send(piece)
+                                .map_err(|err| bterror!("Error submitting work: {}", err))?,
+                            Err(_) => worker_send
+                                .lock()
+                                .unwrap()
+                                .send(piece_id)
+                                .map_err(|err| bterror!("Error remitting to queue: {}", err))?,
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            Ok::<(), BitTorrentError>(())
+        });
+    }
+
+    Ok(master_recieve
         .into_iter()
+        .take(num_pieces as usize)
         .flatten()
-        .collect())
+        .collect::<Vec<_>>())
 }
