@@ -10,6 +10,7 @@ pub struct HandshakeMessage {
 }
 
 impl HandshakeMessage {
+    /// Create a new HandshakeMessage.
     pub fn new(meta_info: &MetaInfo, peer_id: &str) -> Result<HandshakeMessage, BitTorrentError> {
         Ok(HandshakeMessage {
             info_hash: meta_info.info.hash()?,
@@ -17,6 +18,7 @@ impl HandshakeMessage {
         })
     }
 
+    /// Decode a handshake message from a byte array.
     fn decode(bytes: &[u8]) -> Result<HandshakeMessage, BitTorrentError> {
         Ok(HandshakeMessage {
             info_hash: bytes[28..48].try_into().unwrap(),
@@ -24,6 +26,7 @@ impl HandshakeMessage {
         })
     }
 
+    /// Encode a handshake message into a byte array.
     fn encode(&self) -> Vec<u8> {
         [19u8]
             .iter()
@@ -36,6 +39,7 @@ impl HandshakeMessage {
     }
 }
 
+/// Send a handshake message to a peer and receive a response.
 pub fn send_handshake(
     stream: &mut TcpStream,
     message: &HandshakeMessage,

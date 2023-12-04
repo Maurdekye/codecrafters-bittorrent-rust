@@ -27,6 +27,7 @@ pub struct FailureTrackerResponse {
 }
 
 impl SuccessfulTrackerResponse {
+    /// Return the peers as a vector of socket addresses.
     pub fn peers(&self) -> Result<Vec<SocketAddrV4>, BitTorrentError> {
         Ok(encode_maybe_b64_string(&self.peers)?
             .to_vec()
@@ -41,6 +42,7 @@ impl SuccessfulTrackerResponse {
     }
 }
 
+/// Encode a byte slice as a URL-safe percent-escaped string.
 pub fn querystring_encode(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -54,6 +56,7 @@ pub fn querystring_encode(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Query the tracker for a list of peers for the torrent associated with the `meta_info` object passed.
 pub fn query_tracker(
     meta_info: &MetaInfo,
     peer_id: &str,

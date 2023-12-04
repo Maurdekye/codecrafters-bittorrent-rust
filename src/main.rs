@@ -26,6 +26,7 @@ mod info;
 mod tracker;
 mod util;
 
+/// Rust BitTorrent Downloader
 #[derive(Parser)]
 #[clap(about, version)]
 struct Args {
@@ -134,6 +135,7 @@ struct DownloadArgs {
     port: u16,
 }
 
+/// Validate peer ip:port format.
 fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
     let port_ip_re = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
     match port_ip_re.captures(val) {
@@ -164,7 +166,7 @@ fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "download_piece", "-o", "test-piece-2", "sample.torrent", "2"]);
+    // let args = Args::parse_from(["_", "download", "-o", "sample.txt", "sample.torrent"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {

@@ -14,6 +14,7 @@ pub struct BitTorrentError {
 }
 
 impl BitTorrentError {
+    /// Create a new BitTorrentError.
     pub fn new(details: String) -> BitTorrentError {
         BitTorrentError { details: details }
     }

@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::{bterror, error::BitTorrentError};
 
+/// Encode a string that may contain base64 encoded bytes directly into a byte vector.
 pub fn encode_maybe_b64_string(string: &String) -> Result<Vec<u8>, BitTorrentError> {
     Ok(if string.starts_with("base64:") {
         general_purpose::STANDARD_NO_PAD
@@ -13,6 +14,7 @@ pub fn encode_maybe_b64_string(string: &String) -> Result<Vec<u8>, BitTorrentErr
     })
 }
 
+/// Encode a `serde_json::Value` into a bencoded byte vector.
 pub fn bencode_value(value: Value) -> Result<Vec<u8>, BitTorrentError> {
     match value {
         Value::Number(number) => Ok(format!("i{}e", number).as_bytes().to_vec()),

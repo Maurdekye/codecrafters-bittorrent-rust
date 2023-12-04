@@ -25,6 +25,7 @@ pub struct Info {
 }
 
 impl Info {
+    /// Compute the SHA1 hash of the info dictionary.
     pub fn hash(&self) -> Result<[u8; 20], BitTorrentError> {
         let as_object =
             to_value(self).map_err(|err| bterror!("Unable to bencode info dict: {}", err))?;
@@ -32,6 +33,7 @@ impl Info {
         Ok(sha1_hash(&bencoded))
     }
 
+    /// Get the SHA1 hashes of the pieces.
     pub fn pieces(&self) -> Result<Vec<[u8; 20]>, BitTorrentError> {
         Ok(encode_maybe_b64_string(&self.pieces)?
             .to_vec()
@@ -39,8 +41,15 @@ impl Info {
             .map(|chunk| chunk.try_into().unwrap())
             .collect())
     }
+
+    /// Get the number of pieces.
+    pub fn num_pieces(&self) -> usize {
+        // self.length.div_ceil(self.piece_length)
+        (self.length + self.piece_length - 1) / self.piece_length
+    }
 }
 
+/// Read the metainfo file into a `MetaInfo` result.
 pub fn read_metainfo(filename: &str) -> Result<MetaInfo, BitTorrentError> {
     let content = fs::read(filename).map_err(|err| bterror!("Error reading file: {}", err))?;
     let decoded_value = Decoder::new().consume_bencoded_value(&mut &content[..])?;
