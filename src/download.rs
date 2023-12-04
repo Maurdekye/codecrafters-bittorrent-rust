@@ -246,7 +246,7 @@ pub fn download_file(
                             Ok(piece) => master_send
                                 .lock()
                                 .unwrap()
-                                .send(piece)
+                                .send((piece_id, piece))
                                 .map_err(|err| bterror!("Error submitting work: {}", err))?,
                             Err(_) => worker_send
                                 .lock()
@@ -262,9 +262,11 @@ pub fn download_file(
         });
     }
 
-    Ok(master_recieve
+    let mut pieces = master_recieve
         .into_iter()
         .take(num_pieces as usize)
-        .flatten()
-        .collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    pieces.sort_by(|a, b| a.0.cmp(&b.0));
+
+    Ok(pieces.into_iter().flat_map(|(_, piece)| piece).collect())
 }
