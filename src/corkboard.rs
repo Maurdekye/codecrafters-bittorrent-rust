@@ -125,6 +125,8 @@ pub fn corkboard_download(
         port,
     )?));
 
+    println!("Preparing to download {} pieces from {} peers", corkboard.clone().read().unwrap().pieces.len(), corkboard.clone().read().unwrap().peers.len());
+
     let (watchdog_notify, watchdog_alarm) = channel();
 
     // start peer update watchdog
