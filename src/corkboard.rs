@@ -62,7 +62,7 @@ impl Piece {
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Debug)]
 enum PieceState {
     Unfetched,
     InProgress,
@@ -95,7 +95,7 @@ impl Peer {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PeerState {
     Fresh,
     Active(bool),
@@ -116,6 +116,9 @@ pub fn corkboard_download(
     port: u16,
     workers: usize,
 ) -> Result<Vec<u8>, BitTorrentError> {
+
+    // create corkboard
+    println!("Initializing Corkboard");
     let corkboard = Arc::new(RwLock::new(Corkboard::new(
         meta_info.clone(),
         peer_id.to_string(),
@@ -125,19 +128,24 @@ pub fn corkboard_download(
     let (watchdog_notify, watchdog_alarm) = channel();
 
     // start peer update watchdog
+    println!("Starting watchdog");
     let watchdog_board = corkboard.clone();
     let watchdog = thread::spawn(move || {
+        println!("[W] Watchdog init");
         loop {
+
             // wait on watchdog alarm
+            println!("[W] Waiting");
             match watchdog_alarm.recv_timeout(Duration::from_secs(WATCHDOG_INTERVAL)) {
                 Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
                 _ => (),
             }
 
             // update peer information
+            println!("[W] Acquiring corkboard");
             let mut board = watchdog_board.write().unwrap();
 
-
+            println!("[W] Updating peer list");
             match query_tracker(&board.meta_info, &board.peer_id, board.port).and_then(|response| {
                 response.peers()
             }) {
@@ -151,27 +159,34 @@ pub fn corkboard_download(
                     })
                 }
                 Err(err) => {
-                    println!("Error querying tracker: {}", err);
+                    println!("[W] Error querying tracker: {}", err);
                 }
             }
 
+            // release board
+            drop(board);
         }
+        println!("[W] Exiting");
     });
 
     // start workers
+    println!("Starting workers");
     let workers = (0..workers)
-        .map(|_| {
+        .map(|worker_id| {
             let corkboard = corkboard.clone();
             thread::spawn(move || {
+                println!("[{}] Worker init", worker_id);
                 let mut active_connection: Option<PeerConnection> = None;
                 let uses = 0;
 
                 loop {
                     // Acquire board
+                    println!("[{}] Acquiring corkboard pre-fetch", worker_id);
                     let mut board = corkboard.write().unwrap();
 
                     // If all pieces have been acquired, exit
                     if board.pieces.iter().all(|piece| matches!(piece.state, PieceState::Fetched(_))){
+                        println!("[{}] All pieces acquired", worker_id);
                         break;
                     }
 
@@ -196,10 +211,12 @@ pub fn corkboard_download(
 
                     // Check currently active peer
                     active_connection.as_ref().map(|connection| connection.address.clone()).map(|address| {
+                        println!("[{}] Reviewing active connection to peer {}", worker_id, address);
                         let mut peer = board.peers.get(&address).unwrap().clone();
 
                         // If it's inactive or recently refreshed, release it
                         if peer.state == PeerState::Inactive || peer.state == PeerState::Fresh {
+                            println!("[{}] {} connection is {:?}, releasing", worker_id, address, peer.state);
                             active_connection = None;
                         } else {
 
@@ -208,11 +225,13 @@ pub fn corkboard_download(
 
                             // If there is no suitable piece, then mark the peer as superceded and release it
                             if next_piece.is_none() {
+                                println!("[{}] {} has no more needed pieces, releasing", worker_id, address);
                                 active_connection = None;
                                 peer.state = PeerState::Superceded;
 
                             // If this connection has been used more than a maximum number of times in a row, then release it
                             } else if uses >= MAX_PEER_USES {
+                                println!("[{}] {} has been overused, releasing", worker_id, address);
                                 active_connection = None;
                                 peer.state = PeerState::Active(false);
                             }
@@ -226,6 +245,7 @@ pub fn corkboard_download(
                     });
 
                     if active_connection.is_none() {
+                        println!("[{}] Acquiring new peer", worker_id);
 
                         // If there is no active peer, find the peer with the best connection that's available to connect to
                         let mut potential_peers = board
@@ -262,12 +282,15 @@ pub fn corkboard_download(
 
                             // If no peer was found, wait a bit and find a new peer
                             None => {
+                                println!("[{}] No available peers found, waiting", worker_id);
+                                drop(board);
                                 sleep(100);
                                 continue;
                             }
 
                             // If the peer failed to connect, mark it as Errored and find a new peer
                             Some((Err(_), address)) => {
+                                println!("[{}] Failed to connect to peer at {}, marking and looking for new peer", worker_id, address);
                                 board
                                     .peers
                                     .entry(address.clone())
@@ -277,6 +300,7 @@ pub fn corkboard_download(
 
                             // On successful connection, mark the peer as active and set it as the active peer
                             Some((Ok(connection), address)) => {
+                                println!("[{}] Connected to {}", worker_id, address);
                                 board
                                     .peers
                                     .entry(address.clone())
@@ -285,6 +309,17 @@ pub fn corkboard_download(
 
                                 // Locate a new piece to download
                                 next_piece = find_piece(&active_connection, &board);
+
+                                // If no pieces are available, mark connection as superceded and look for another peer
+                                if next_piece.is_none() {
+                                    println!("[{}] {} has no more needed pieces, releasing", worker_id, address);
+                                    active_connection = None;
+                                    board
+                                        .peers
+                                        .entry(address.clone())
+                                        .and_modify(|peer| peer.state = PeerState::Superceded);
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -296,13 +331,15 @@ pub fn corkboard_download(
                         });
                     });
 
-                    // Release board (implicit)
+                    // Release board pre-fetch
+                    drop(board);
 
                     // Download chosen piece from chosen peer, recording download time
                     let download_result = active_connection.as_mut().and_then(|connection| {
                         next_piece
                             .as_ref()
                             .map(|piece_id| {
+                                println!("[{}] Downloading piece {} from {}", worker_id, piece_id, connection.address);
                                 let start_time = SystemTime::now();
                                 let result = connection.download_piece(*piece_id as u32);
                                 let duration = SystemTime::now().duration_since(start_time).unwrap().as_millis() as usize;
@@ -310,22 +347,24 @@ pub fn corkboard_download(
                             })
                     });
 
-                    // Reaquire board
-                    let mut board = corkboard.write().unwrap();
-
                     // Check result of download
                     match download_result {
 
-                        // (unreachable)
+                        // No download occurred: this should never happen
                         None => {
-                            println!("No piece chosen and/or no active connection to download from...? this shouldn't ever happen");
+                            println!("[{}] Nothing was downloaded; this should never happen", worker_id);
                         }
 
                         // Error during download
                         Some(Err(_)) => {
 
+                            // Reaquire board
+                            println!("[{}] Acquiring corkboard post-fetch", worker_id);
+                            let mut board = corkboard.write().unwrap();
+
                             // Mark peer as errored
                             active_connection.as_ref().map(|connection| { 
+                                println!("[{}] connection to {} interrupted, marking as errored and dropping", worker_id, connection.address);
                                 board
                                     .peers
                                     .entry(connection.address.clone())
@@ -342,10 +381,22 @@ pub fn corkboard_download(
                                 });
                             });
 
+                            // Release board post-fetch
+                            drop(board);
                         }
 
                         // Piece downloaded successfully
                         Some(Ok((data, duration))) => {
+
+                            active_connection.as_ref().map(|connection| {
+                                next_piece.as_ref().map(|piece_id: &usize| {
+                                    println!("[{}] finished downloading piece {} from {}", worker_id, piece_id, connection.address);
+                                })
+                            });
+
+                            // Reaquire board
+                            println!("[{}] Acquiring corkboard post-fetch", worker_id);
+                            let mut board = corkboard.write().unwrap();
 
                             // Record benchmark of network performance on peer
                             active_connection.as_ref().map(|connection| {
@@ -363,12 +414,14 @@ pub fn corkboard_download(
                                     if hash_matches {
     
                                         // If hash matches, mark piece as downloaded
+                                        println!("[{}] Storing piece {}", worker_id, piece_id);
                                         board.pieces.get_mut(*piece_id).map(|piece| {
                                             piece.state = PieceState::Fetched(data);
                                         });
                                         board.notify_piece_completion();
                                     } else {
     
+                                        println!("[{}] Hash of downloaded piece {} does not match; discarding", worker_id, piece_id);
                                         // If hash does not match, discard data and re-mark piece as unfetched
                                         board.pieces.get_mut(*piece_id).map(|piece| {
                                             piece.state = PieceState::Unfetched;
@@ -383,21 +436,28 @@ pub fn corkboard_download(
                                     }
                                 });
                             });
+
+                            // Release board post-fetch
+                            drop(board);
                         }
                     }
                 }
+                println!("[{}] Exiting", worker_id);
             })
         })
         .collect::<Vec<_>>();
 
     // wait for workers to finish
+    println!("Waiting for workers to finish");
     workers.into_iter().for_each(|worker| worker.join().unwrap());
 
     // send kill signal to watchdog (may not be directly necessary; the channel dropping should kill the watchdog automatically)
+    println!("Killing watchdog");
     watchdog_notify.send(()).unwrap();
     watchdog.join().unwrap();
 
     // collect data
+    println!("Collecting data");
     let board = corkboard.read().unwrap();
     let data = board.pieces.iter().map(|piece| match &piece.state {
         PieceState::Fetched(data) => Ok(data),
@@ -405,5 +465,6 @@ pub fn corkboard_download(
     }).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<&u8>>();
 
     // this is really memory inefficient... need to figure out a better way to save and collect data
+    println!("Done");
     Ok(data.into_iter().copied().collect())
 }
