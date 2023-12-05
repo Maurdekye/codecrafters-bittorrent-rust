@@ -1,4 +1,7 @@
-use std::{net::{Ipv4Addr, SocketAddrV4}, str::from_utf8};
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    str::from_utf8,
+};
 
 use serde::Deserialize;
 
@@ -35,7 +38,7 @@ impl SuccessfulTrackerResponse {
             .map(|chunk| {
                 SocketAddrV4::new(
                     Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
-                    u16::from_be_bytes([chunk[4], chunk[5]])
+                    u16::from_be_bytes([chunk[4], chunk[5]]),
                 )
             })
             .collect())
@@ -67,14 +70,14 @@ pub fn query_tracker(
     let raw_body = client
         .get(format!(
             "{}?{}",
-            meta_info.announce,
+            meta_info.preferred_tracker(),
             [
-                ("info_hash", querystring_encode(&meta_info.info.hash()?)),
+                ("info_hash", querystring_encode(&meta_info.hash()?)),
                 ("peer_id", peer_id.to_string()),
                 ("port", format!("{}", port)),
                 ("uploaded", "0".to_string()),
                 ("downloaded", "0".to_string()),
-                ("left", format!("{}", meta_info.info.length)),
+                ("left", format!("{}", meta_info.length())),
                 ("compact", "1".to_string()),
             ]
             .into_iter()

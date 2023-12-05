@@ -4,7 +4,7 @@ use serde_json::Value;
 use crate::{bterror, error::BitTorrentError};
 
 /// Encode a string that may contain base64 encoded bytes directly into a byte vector.
-pub fn encode_maybe_b64_string(string: &String) -> Result<Vec<u8>, BitTorrentError> {
+pub fn encode_maybe_b64_string(string: &str) -> Result<Vec<u8>, BitTorrentError> {
     Ok(if string.starts_with("base64:") {
         general_purpose::STANDARD_NO_PAD
             .decode(&string[7..])

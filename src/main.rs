@@ -1,18 +1,19 @@
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpStream},
+    path::PathBuf,
 };
 
 use clap::Parser;
 use download::download_piece_from_peer;
 use error::BitTorrentError;
 use handshake::{send_handshake, HandshakeMessage};
-use info::read_metainfo;
 use regex::Regex;
 use tracker::query_tracker;
 
 use crate::{
-    corkboard::corkboard_download, decode::Decoder, download::download_file, util::bytes_to_hex,
+    corkboard::corkboard_download, decode::Decoder, download::download_file, info::MetaInfo,
+    util::bytes_to_hex,
 };
 
 mod corkboard;
@@ -141,9 +142,9 @@ struct DownloadV2Args {
     #[arg(required = true)]
     torrent_file: String,
 
-    /// Output file location
-    #[arg(short, long)]
-    output: String,
+    /// Output directory
+    #[arg(short, long, value_parser = pathbuf_parse)]
+    output: PathBuf,
 
     /// Peer ID for handshake
     #[arg(short = 'i', long, default_value = "00112233445566778899")]
@@ -156,6 +157,10 @@ struct DownloadV2Args {
     /// Number of workers
     #[arg(short, long, default_value_t = 5)]
     workers: usize,
+}
+
+fn pathbuf_parse(val: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from(val))
 }
 
 /// Validate peer ip:port format.
@@ -198,26 +203,29 @@ fn main() -> Result<(), BitTorrentError> {
             println!("{}", decoded);
         }
         Subcommand::Info(info_args) => {
-            let meta_info = read_metainfo(&info_args.torrent_file)?;
-            let info_hash = meta_info.info.hash()?;
+            let meta_info = MetaInfo::from_file(&info_args.torrent_file)?;
+            let info_hash = meta_info.hash()?;
             println!("Tracker URL: {}", meta_info.announce);
-            println!("Length: {}", meta_info.info.length);
+            println!("Length: {}", meta_info.length());
             println!("Info Hash: {}", bytes_to_hex(&info_hash));
-            println!("Piece Length: {}", meta_info.info.piece_length);
+            println!(
+                "Piece Length: {}",
+                info_field!(&meta_info.info, piece_length)
+            );
             println!("Piece Hashes:");
-            for hash in meta_info.info.pieces()? {
+            for hash in meta_info.pieces()? {
                 println!("{}", bytes_to_hex(&hash));
             }
         }
         Subcommand::Peers(peers_args) => {
-            let meta_info = read_metainfo(&peers_args.torrent_file)?;
+            let meta_info = MetaInfo::from_file(&peers_args.torrent_file)?;
             let tracker_info = query_tracker(&meta_info, &peers_args.peer_id, peers_args.port)?;
             for sock in tracker_info.peers()? {
                 println!("{}", sock);
             }
         }
         Subcommand::Handshake(handshake_args) => {
-            let meta_info = read_metainfo(&handshake_args.torrent_file)?;
+            let meta_info = MetaInfo::from_file(&handshake_args.torrent_file)?;
             let message = HandshakeMessage::new(&meta_info, &handshake_args.peer_id)?;
             let mut stream = TcpStream::connect(&handshake_args.peer)
                 .map_err(|err| bterror!("Error connecting to peer: {}", err))?;
@@ -225,7 +233,7 @@ fn main() -> Result<(), BitTorrentError> {
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
         }
         Subcommand::DownloadPiece(download_piece_args) => {
-            let meta_info = read_metainfo(&download_piece_args.torrent_file)?;
+            let meta_info = MetaInfo::from_file(&download_piece_args.torrent_file)?;
             let data = download_piece_from_peer(
                 &meta_info,
                 download_piece_args.piece_id as u32,
@@ -240,7 +248,7 @@ fn main() -> Result<(), BitTorrentError> {
             );
         }
         Subcommand::Download(download_args) => {
-            let meta_info = read_metainfo(&download_args.torrent_file)?;
+            let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
             let full_file = download_file(&meta_info, &download_args.peer_id, download_args.port)?;
             fs::write(&download_args.output, full_file)
                 .map_err(|err| bterror!("Error writing to disk: {}", err))?;
@@ -250,19 +258,17 @@ fn main() -> Result<(), BitTorrentError> {
             );
         }
         Subcommand::DownloadV2(download_args) => {
-            let meta_info = read_metainfo(&download_args.torrent_file)?;
+            let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
             let full_file = corkboard_download(
                 &meta_info,
                 &download_args.peer_id,
                 download_args.port,
                 download_args.workers,
             )?;
-            fs::write(&download_args.output, full_file)
-                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
-            println!(
-                "Downloaded {} to {}.",
-                download_args.torrent_file, &download_args.output
-            );
+            meta_info
+                .save_to_path(&download_args.output, full_file)
+                .map_err(|err| bterror!("Error saving torrent file(s): {}", err))?;
+            println!("Downloaded {} to {}.", download_args.torrent_file, &download_args.output.to_str().unwrap());
         }
     }
     Ok(())

@@ -11,7 +11,8 @@ use crate::{
 };
 
 const MAX_PEER_USES: usize = 5;
-const WATCHDOG_INTERVAL: u64 = 30;
+/// conversion factor of bytes / millisecond to mebibites / second
+const MB_S: f64 = 1048.576;
 
 struct Corkboard {
     meta_info: MetaInfo,
@@ -19,24 +20,26 @@ struct Corkboard {
     port: u16,
     pieces: Vec<Piece>,
     remaining_pieces: usize,
+    watchdog_interval: usize,
     peers: HashMap<SocketAddrV4, Peer>,
 }
 
 impl Corkboard {
     fn new(meta_info: MetaInfo, peer_id: String, port: u16) -> Result<Self, BitTorrentError> {
+        let tracker_response = query_tracker(&meta_info, &peer_id, port)?;
         Ok(Self {
-            remaining_pieces: meta_info.info.num_pieces(),
+            remaining_pieces: meta_info.num_pieces(),
             pieces: meta_info
-                .info
                 .pieces()?
                 .into_iter()
                 .map(Piece::new)
                 .collect(),
-            peers: query_tracker(&meta_info, &peer_id, port)?
+            peers: tracker_response
                 .peers()?
                 .into_iter()
                 .map(|address| (address, Peer::new()))
                 .collect(),
+            watchdog_interval: tracker_response.interval,
             meta_info,
             peer_id,
             port,
@@ -85,6 +88,7 @@ impl Peer {
         }
     }
 
+    /// Update the peer's benchmark performance rating, for use in ranking their fitness to download a torrent with
     fn update_performance(&mut self) {
         self.performance = Some(
             self.benchmarks.iter().map(|Benchmark { 
@@ -110,6 +114,15 @@ struct Benchmark {
     duration_millis: usize,
 }
 
+/// ## Corkboard Download
+/// 
+/// Download the torrent using a self-coined 'Corkboard' synchronization strategy.
+/// Each worker refernces a mutually accessible `Corkboard`, which contains relevant
+/// information about all active peers, and all torrent pieces. Workers reference the
+/// corkboard to determine which peers are valid to pick up, and which pieces need to be
+/// fetched. They check it once before performing their download to determine which peer to
+/// connect to and which piece to acquire, and once afterwards to validate and submit their
+/// successful download to the board.
 pub fn corkboard_download(
     meta_info: &MetaInfo,
     peer_id: &str,
@@ -134,11 +147,12 @@ pub fn corkboard_download(
     let watchdog_board = corkboard.clone();
     let watchdog = thread::spawn(move || {
         println!("[W] Watchdog init");
+        let mut interval = watchdog_board.read().unwrap().watchdog_interval;
         loop {
 
             // wait on watchdog alarm
-            println!("[W] Waiting");
-            match watchdog_alarm.recv_timeout(Duration::from_secs(WATCHDOG_INTERVAL)) {
+            println!("[W] Waiting {} s", interval);
+            match watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)) {
                 Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
                 _ => (),
             }
@@ -149,6 +163,7 @@ pub fn corkboard_download(
 
             println!("[W] Updating peer list");
             match query_tracker(&board.meta_info, &board.peer_id, board.port).and_then(|response| {
+                interval = response.interval;
                 response.peers()
             }) {
                 Ok(peers) => {
@@ -405,6 +420,7 @@ pub fn corkboard_download(
                                 board.peers.entry(connection.address.clone()).and_modify(|peer| {
                                     peer.benchmarks.push(Benchmark { bytes: data.len(), duration_millis: duration });
                                     peer.update_performance();
+                                    println!("[{}] {} has a download performance of {:.4} MB/s", worker_id, connection.address, peer.performance.unwrap_or(0.0) / MB_S);
                                 });
                             });
                             

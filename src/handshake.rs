@@ -13,7 +13,7 @@ impl HandshakeMessage {
     /// Create a new HandshakeMessage.
     pub fn new(meta_info: &MetaInfo, peer_id: &str) -> Result<HandshakeMessage, BitTorrentError> {
         Ok(HandshakeMessage {
-            info_hash: meta_info.info.hash()?,
+            info_hash: meta_info.hash()?,
             peer_id: peer_id.as_bytes().to_vec(),
         })
     }

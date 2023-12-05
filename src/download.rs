@@ -5,6 +5,7 @@ use std::{io::prelude::*, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
+use crate::info_field;
 use crate::util::{decode_bitfield_be, encode_bitfield_be};
 use crate::{
     bterror,
@@ -150,7 +151,7 @@ impl PeerConnection {
         // wait for bitfield
         self.bitfield = match self.await_peer_message()? {
             PeerMessage::Bitfield(bitfield) => {
-                bitfield.bitfield[..self.meta_info.info.num_pieces()].to_vec()
+                bitfield.bitfield[..self.meta_info.num_pieces()].to_vec()
             }
             message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
         };
@@ -169,9 +170,9 @@ impl PeerConnection {
 
     /// Download a piece of the file, with `piece_id` corresponding to the piece to download.
     pub fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, BitTorrentError> {
-        let chunk_offset = piece_id * self.meta_info.info.piece_length as u32;
-        let chunk_size = (self.meta_info.info.length as u32 - chunk_offset)
-            .min(self.meta_info.info.piece_length as u32);
+        let chunk_offset = piece_id * *info_field!(&self.meta_info.info, piece_length) as u32;
+        let chunk_size = (self.meta_info.length() as u32 - chunk_offset)
+            .min(*info_field!(&self.meta_info.info, piece_length) as u32);
 
         // send requests
         let num_chunks = (0..chunk_size)
@@ -210,7 +211,7 @@ impl PeerConnection {
 
         // check hash
         let hash = sha1_hash(&full_piece);
-        let check_hash = self.meta_info.info.pieces()?[piece_id as usize];
+        let check_hash = self.meta_info.pieces()?[piece_id as usize];
         if hash != check_hash {
             Err(bterror!(
                 "Piece hash mismatch: meta info hash: {}, actual hash: {}",
@@ -276,7 +277,7 @@ pub fn download_file(
     let (master_send, master_recieve) = mpsc::channel();
     let master_send = Arc::new(Mutex::new(master_send));
 
-    let num_pieces = meta_info.info.num_pieces();
+    let num_pieces = meta_info.num_pieces();
 
     for piece_id in 0..num_pieces {
         worker_send
