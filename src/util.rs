@@ -44,3 +44,7 @@ pub fn sha1_hash(bytes: &[u8]) -> [u8; 20] {
     hasher.update(bytes);
     hasher.finalize().into()
 }
+
+pub fn sleep(millis: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(millis))
+}

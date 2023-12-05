@@ -12,11 +12,10 @@ use regex::Regex;
 use tracker::query_tracker;
 
 use crate::{
-    decode::Decoder,
-    download::download_file,
-    util::bytes_to_hex,
+    corkboard::corkboard_download, decode::Decoder, download::download_file, util::bytes_to_hex,
 };
 
+mod corkboard;
 mod decode;
 mod download;
 mod encode;
@@ -43,6 +42,7 @@ enum Subcommand {
     #[command(name = "download_piece")]
     DownloadPiece(DownloadPieceArgs),
     Download(DownloadArgs),
+    DownloadV2(DownloadV2Args),
 }
 
 #[derive(Parser)]
@@ -135,6 +135,29 @@ struct DownloadArgs {
     port: u16,
 }
 
+#[derive(Parser)]
+struct DownloadV2Args {
+    /// File with torrent information
+    #[arg(required = true)]
+    torrent_file: String,
+
+    /// Output file location
+    #[arg(short, long)]
+    output: String,
+
+    /// Peer ID for handshake
+    #[arg(short = 'i', long, default_value = "00112233445566778899")]
+    peer_id: String,
+
+    /// Port for handshake
+    #[arg(short, long, default_value_t = 6881)]
+    port: u16,
+
+    /// Number of workers
+    #[arg(short, long, default_value_t = 5)]
+    workers: usize,
+}
+
 /// Validate peer ip:port format.
 fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
     let port_ip_re = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
@@ -219,6 +242,21 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Download(download_args) => {
             let meta_info = read_metainfo(&download_args.torrent_file)?;
             let full_file = download_file(&meta_info, &download_args.peer_id, download_args.port)?;
+            fs::write(&download_args.output, full_file)
+                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
+            println!(
+                "Downloaded {} to {}.",
+                download_args.torrent_file, &download_args.output
+            );
+        }
+        Subcommand::DownloadV2(download_args) => {
+            let meta_info = read_metainfo(&download_args.torrent_file)?;
+            let full_file = corkboard_download(
+                &meta_info,
+                &download_args.peer_id,
+                download_args.port,
+                download_args.workers,
+            )?;
             fs::write(&download_args.output, full_file)
                 .map_err(|err| bterror!("Error writing to disk: {}", err))?;
             println!(

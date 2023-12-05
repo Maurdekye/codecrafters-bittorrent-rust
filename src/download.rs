@@ -109,18 +109,18 @@ impl PeerMessage {
 }
 
 #[derive(Debug)]
-struct PeerConnection {
+pub struct PeerConnection {
     #[allow(unused)]
-    address: SocketAddrV4,
-    meta_info: MetaInfo,
-    peer_id: String,
-    stream: TcpStream,
-    bitfield: Vec<bool>,
+    pub address: SocketAddrV4,
+    pub meta_info: MetaInfo,
+    pub peer_id: String,
+    pub stream: TcpStream,
+    pub bitfield: Vec<bool>,
 }
 
 impl PeerConnection {
     /// Create a new peer connection.
-    fn new(
+    pub fn new(
         peer: SocketAddrV4,
         meta_info: MetaInfo,
         peer_id: String,
@@ -140,7 +140,7 @@ impl PeerConnection {
     /// 2. waits for a `bitfield`
     /// 3. sends an `interested`
     /// 4. waits for an `unchoke`
-    fn initialize(&mut self) -> Result<(), BitTorrentError> {
+    pub fn initialize(&mut self) -> Result<(), BitTorrentError> {
         // send handshake
         send_handshake(
             &mut self.stream,
@@ -168,7 +168,7 @@ impl PeerConnection {
     }
 
     /// Download a piece of the file, with `piece_id` corresponding to the piece to download.
-    fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, BitTorrentError> {
+    pub fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, BitTorrentError> {
         let chunk_offset = piece_id * self.meta_info.info.piece_length as u32;
         let chunk_size = (self.meta_info.info.length as u32 - chunk_offset)
             .min(self.meta_info.info.piece_length as u32);
