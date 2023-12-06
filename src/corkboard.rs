@@ -1,13 +1,23 @@
 use std::{
     collections::HashMap,
     net::SocketAddrV4,
-    sync::{Arc, RwLock, RwLockWriteGuard, mpsc::{channel, RecvTimeoutError}},
-    thread::{self}, time::{SystemTime, Duration},
+    sync::{
+        mpsc::{channel, RecvTimeoutError},
+        Arc, RwLock,
+    },
+    thread::{self},
+    time::{Duration, SystemTime},
 };
 
+use chrono::Utc;
+
 use crate::{
-    download::PeerConnection, error::BitTorrentError, info::MetaInfo,
-    util::{sleep, sha1_hash}, bterror, multimodal_tracker::Tracker,
+    bterror,
+    download::PeerConnection,
+    error::BitTorrentError,
+    info::MetaInfo,
+    multimodal_tracker::Tracker,
+    util::{sha1_hash, sleep},
 };
 
 const MAX_PEER_USES: usize = 5;
@@ -20,28 +30,18 @@ struct Corkboard {
     peer_id: String,
     port: u16,
     pieces: Vec<Piece>,
-    remaining_pieces: usize,
     peers: HashMap<SocketAddrV4, Peer>,
 }
 
 impl Corkboard {
     fn new(meta_info: MetaInfo, peer_id: String, port: u16) -> Result<Self, BitTorrentError> {
         Ok(Self {
-            remaining_pieces: meta_info.num_pieces(),
-            pieces: meta_info
-                .pieces()?
-                .into_iter()
-                .map(Piece::new)
-                .collect(),
+            pieces: meta_info.pieces()?.into_iter().map(Piece::new).collect(),
             peers: HashMap::new(),
             meta_info,
             peer_id,
             port,
         })
-    }
-
-    fn notify_piece_completion(&mut self) {
-        self.remaining_pieces -= 1;
     }
 }
 
@@ -83,13 +83,20 @@ impl Peer {
     }
 
     /// Update the peer's benchmark performance rating, for use in ranking their fitness to download a torrent with
-    fn update_performance(&mut self) {
-        self.performance = Some(
-            self.benchmarks.iter().map(|Benchmark { 
-                bytes, 
-                duration_millis
-            }| (*bytes as f64) / (*duration_millis as f64)).sum::<f64>() / (self.benchmarks.len() as f64)
-        );   
+    fn update_performance(&mut self) -> f64 {
+        let performance = self
+            .benchmarks
+            .iter()
+            .map(
+                |Benchmark {
+                     bytes,
+                     duration_millis,
+                 }| (*bytes as f64) / (*duration_millis as f64),
+            )
+            .sum::<f64>()
+            / (self.benchmarks.len() as f64);
+        self.performance = Some(performance);
+        performance
     }
 }
 
@@ -99,6 +106,7 @@ enum PeerState {
     Active(bool),
     Inactive,
     Superceded,
+    Connecting,
     Error,
 }
 
@@ -108,8 +116,25 @@ struct Benchmark {
     duration_millis: usize,
 }
 
+enum PeerSearchResult {
+    ConnectNew(SocketAddrV4),
+    Reuse(PeerConnection),
+    WaitThenRefetch(u64),
+    PromptRefetch,
+    Exit,
+}
+
+enum LoopAction {
+    Continue,
+    Pass,
+}
+
+fn timestr() -> String {
+    Utc::now().format("%T.%f").to_string()
+}
+
 /// ## Corkboard Download
-/// 
+///
 /// Download the torrent using a self-coined 'Corkboard' synchronization strategy.
 /// Each worker refernces a mutually accessible `Corkboard`, which contains relevant
 /// information about all active peers, and all torrent pieces. Workers reference the
@@ -123,69 +148,73 @@ pub fn corkboard_download(
     port: u16,
     workers: usize,
 ) -> Result<Vec<u8>, BitTorrentError> {
+    let log = |msg: String| println!("[{}] {msg}", timestr());
 
     // create corkboard
-    println!("Initializing Corkboard");
+    log(format!("Initializing Corkboard"));
     let corkboard = Arc::new(RwLock::new(Corkboard::new(
         meta_info,
         peer_id.to_string(),
         port,
     )?));
 
-    println!("Preparing to download {} pieces from {} peers", corkboard.clone().read().unwrap().pieces.len(), corkboard.clone().read().unwrap().peers.len());
+    log(format!(
+        "Preparing to download {} pieces",
+        corkboard.clone().read().unwrap().pieces.len(),
+    ));
 
     let (watchdog_notify, watchdog_alarm) = channel();
 
     // start peer update watchdog
-    println!("Starting watchdog");
+    log(format!("Starting watchdog"));
     let watchdog_board = corkboard.clone();
     let watchdog = thread::spawn(move || {
-        println!("[W] Watchdog init");
+        let log = |msg: String| println!("[{}][W] {msg}", timestr());
+
+        log(format!("Watchdog init"));
+
         // fetch board to get a copy of meta_info
         let board = watchdog_board.read().unwrap();
         let meta_info = board.meta_info.clone();
         drop(board);
 
-        println!("[W] Initializing tracker connection");
+        log(format!("Initializing tracker connection"));
         let mut tracker = Tracker::new(&meta_info).expect("Tracker unable to connect!");
         loop {
-
             // update peer information
-            println!("[W] Acquiring corkboard");
+            log(format!("Acquiring corkboard"));
             let mut board = watchdog_board.write().unwrap();
 
-            println!("[W] Updating peer list");
-            let interval = match tracker.query(&board.peer_id, board.port).and_then(|response| {
-                Ok((response.peers()?, response.interval))
-            }) {
+            log(format!("Updating peer list"));
+            let interval = match tracker
+                .query(&board.peer_id, board.port)
+                .and_then(|response| Ok((response.peers()?, response.interval)))
+            {
                 Ok((mut peers, interval)) => {
+                    log(format!("Found {} peers", peers.len()));
                     board.peers.iter_mut().for_each(|(address, peer)| {
                         if peer.state != PeerState::Error {
                             peer.state = match peers
                                 .iter()
                                 .enumerate()
                                 .find(|(_, peer)| *peer == address)
-                                .map(|(i, _)| i) 
-                                {
+                                .map(|(i, _)| i)
+                            {
                                 Some(i) => {
                                     peers.remove(i);
                                     PeerState::Fresh
                                 }
-                                None => PeerState::Inactive
+                                None => PeerState::Inactive,
                             }
                         }
                     });
                     board
                         .peers
-                        .extend(
-                            peers
-                                .into_iter()
-                                .map(|address| (address, Peer::new()))
-                            );
+                        .extend(peers.into_iter().map(|address| (address, Peer::new())));
                     interval
                 }
                 Err(err) => {
-                    println!("[W] Error querying tracker: {}", err);
+                    log(format!("Error querying tracker: {}", err));
                     WATCHDOG_RETRY_INTERVAL
                 }
             };
@@ -194,13 +223,13 @@ pub fn corkboard_download(
             drop(board);
 
             // wait on watchdog alarm
-            println!("[W] Waiting {}s", interval);
+            log(format!("Waiting {interval}s"));
             match watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)) {
                 Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
                 _ => (),
             }
         }
-        println!("[W] Exiting");
+        log(format!("Exiting"));
     });
 
     // start workers
@@ -209,27 +238,176 @@ pub fn corkboard_download(
         .map(|worker_id| {
             let corkboard = corkboard.clone();
             thread::spawn(move || {
-                println!("[{}] Worker init", worker_id);
+                let log = |msg: String| println!("[{}][{worker_id}] {msg}", timestr());
+
+                log(format!("Worker init"));
+                let (meta_info, peer_id) = corkboard
+                    .read()
+                    .map(|board| (board.meta_info.clone(), board.peer_id.clone()))
+                    .unwrap();
+
                 let mut active_connection: Option<PeerConnection> = None;
-                let uses = 0;
+                let mut uses = 0;
 
                 loop {
-                    // Acquire board
-                    println!("[{}] Acquiring corkboard pre-fetch", worker_id);
-                    let mut board = corkboard.write().unwrap();
+                    // ! first exclusion zone
+                    let peer_search_result = {
+                        corkboard
+                            .write()
+                            .map(|mut board| {
+                                // If all pieces have been acquired, exit
+                                if board
+                                    .pieces
+                                    .iter()
+                                    .all(|piece| matches!(piece.state, PieceState::Fetched(_)))
+                                {
+                                    log(format!("All pieces have been acquired, exiting"));
+                                    return PeerSearchResult::Exit;
+                                }
 
-                    // If all pieces have been acquired, exit
-                    if board.pieces.iter().all(|piece| matches!(piece.state, PieceState::Fetched(_))){
-                        println!("[{}] All pieces acquired", worker_id);
-                        break;
-                    }
+                                match active_connection
+                                    .map(|connection| (connection.address.clone(), connection))
+                                {
+                                    // review existing peer connection
+                                    Some((address, connection)) => {
+                                        let peer = board.peers.get(&address).unwrap().clone();
+                                        if peer.state == PeerState::Inactive
+                                            || peer.state == PeerState::Fresh
+                                        {
+                                            // existing peer is deactivated or refreshed: drop the connection and pick up a new one
+                                            log(format!("Existing peer is fresh or inactive, refetching"));
+                                            PeerSearchResult::PromptRefetch
+                                        } else if uses >= MAX_PEER_USES {
+                                            // peer has been reused too many times, drop it and find another peer
+                                            log(format!("Existing peer is overused, refetching"));
+                                            board.peers.entry(address).and_modify(|peer| {
+                                                peer.state = PeerState::Active(false)
+                                            });
+                                            PeerSearchResult::PromptRefetch
+                                        } else {
+                                            // existing peer is fine to reuse
+                                            PeerSearchResult::Reuse(connection)
+                                        }
+                                    }
 
-                    // Piece finding routine definition
-                    let find_piece =
-                        |active_connection: &Option<PeerConnection>,
-                         board: &RwLockWriteGuard<Corkboard>| {
-                            active_connection.as_ref().and_then(|connection| {
-                                board
+                                    // find a new peer
+                                    None => {
+                                        log(format!("Searching for new peer"));
+
+                                        // search for unclaimed active & fresh peers
+                                        let mut potential_peers = board
+                                            .peers
+                                            .iter()
+                                            .filter(|(_, peer)| {
+                                                matches!(
+                                                    peer.state,
+                                                    PeerState::Fresh | PeerState::Active(false)
+                                                )
+                                            })
+                                            .collect::<Vec<_>>();
+
+                                        // sort by connection speed
+                                        potential_peers.sort_by(|(_, peer_a), (_, peer_b)| {
+                                            peer_b
+                                                .performance
+                                                .unwrap_or(f64::MAX)
+                                                .partial_cmp(
+                                                    &peer_a.performance.unwrap_or(f64::MAX),
+                                                )
+                                                .unwrap_or(std::cmp::Ordering::Equal)
+                                        });
+
+                                        let potential_peer = potential_peers
+                                            .first()
+                                            .map(|(&address, _)| address.clone());
+
+                                        match potential_peer {
+                                            // if a peer was found, mark it as connecting
+                                            Some(address) => {
+                                                log(format!("Found peer {address}, attempting to connect"));
+                                                board.peers.entry(address).and_modify(|peer| {
+                                                    peer.state = PeerState::Connecting
+                                                });
+                                                PeerSearchResult::ConnectNew(address)
+                                            }
+
+                                            // if no peer was found, wait a bit and try again
+                                            None => {
+                                                log(format!("No peers found, waiting and retrying"));
+                                                PeerSearchResult::WaitThenRefetch(100)
+                                            },
+                                        }
+                                    }
+                                }
+                            })
+                            .unwrap()
+                    };
+                    // ! end of first mutual exclusion zone
+
+                    active_connection = None;
+                    let mut connection = match peer_search_result {
+                        PeerSearchResult::ConnectNew(address) => {
+                            // try to connect to the new peer
+                            let connection_result = PeerConnection::new(
+                                address.clone(),
+                                meta_info.clone(),
+                                peer_id.to_string(),
+                            )
+                            .and_then(|mut connection| {
+                                connection.initialize()?;
+                                Ok(connection)
+                            });
+
+                            match connection_result {
+
+                                // if successful, mark peer as active & claimed
+                                Ok(connection) => {
+                                    log(format!("Connected to {address}"));
+                                    uses = 0;
+                                    corkboard
+                                        .write()
+                                        .map(|mut board| {
+                                            board.peers.entry(address.clone()).and_modify(|peer| {
+                                                peer.state = PeerState::Active(true)
+                                            });
+                                        })
+                                        .unwrap();
+                                    connection
+                                }
+
+                                // if unsuccessful, mark peer as errored and try another one
+                                Err(err) => {
+                                    log(format!("Failed to connect to {address}: {err}"));
+                                    corkboard
+                                        .write()
+                                        .map(|mut board| {
+                                            board
+                                                .peers
+                                                .entry(address.clone())
+                                                .and_modify(|peer| peer.state = PeerState::Error);
+                                        })
+                                        .unwrap();
+                                    continue;
+                                }
+                            }
+                        }
+                        PeerSearchResult::Reuse(connection) => connection,
+                        PeerSearchResult::WaitThenRefetch(millis) => {
+                            sleep(millis);
+                            continue;
+                        }
+                        PeerSearchResult::PromptRefetch => continue,
+                        PeerSearchResult::Exit => break,
+                    };
+
+                    // ! second mutual exclusion zone
+                    let next_piece = {
+                        corkboard
+                            .write()
+                            .map(|mut board| {
+
+                                // try to find a piece to download
+                                let next_piece = board
                                     .pieces
                                     .iter()
                                     .enumerate()
@@ -237,254 +415,128 @@ pub fn corkboard_download(
                                     .find(|((_, piece), has_piece)| {
                                         piece.state == PieceState::Unfetched && *has_piece
                                     })
-                                    .map(|((piece_id, _), _)| piece_id)
+                                    .map(|((piece_id, _), _)| piece_id);
+                                match next_piece {
+
+                                    // if piece was found, mark it as in progress
+                                    Some(piece) => {
+                                        log(format!("Chose piece {piece}"));
+                                        board.pieces.get_mut(piece).map(|piece| {
+                                            piece.state = PieceState::InProgress;
+                                        });
+                                    }
+
+                                    // if no piece was found, mark peer as superceded and try again
+                                    None => {
+                                        log(format!("No pieces available, dropping peer {}", connection.address));
+                                        board
+                                            .peers
+                                            .entry(connection.address.clone())
+                                            .and_modify(|peer| peer.state = PeerState::Superceded);
+                                    }
+                                };
+                                next_piece
                             })
-                        };
+                            .unwrap()
+                    };
+                    // ! end of second mutual exclusion zone
 
-                    let mut next_piece = None;
+                    let piece_id = match next_piece {
+                        Some(piece) => piece,
+                        None => continue,
+                    };
 
-                    // Check currently active peer
-                    active_connection.as_ref().map(|connection| connection.address.clone()).map(|address| {
-                        println!("[{}] Reviewing active connection to peer {}", worker_id, address);
-                        let mut peer = board.peers.get(&address).unwrap().clone();
+                    log(format!("Downloading piece {piece_id} from {}", connection.address));
+                    // download piece, recording download time
+                    let start_time = SystemTime::now();
+                    let result = connection.download_piece(piece_id as u32);
+                    let duration = SystemTime::now()
+                        .duration_since(start_time)
+                        .unwrap()
+                        .as_millis() as usize;
 
-                        // If it's inactive or recently refreshed, release it
-                        if peer.state == PeerState::Inactive || peer.state == PeerState::Fresh {
-                            println!("[{}] {} connection is {:?}, releasing", worker_id, address, peer.state);
-                            active_connection = None;
-                        } else {
+                    // ! third mutual exclusion zone
+                    let download_result = corkboard
+                        .write()
+                        .map(|mut board| {
+                            match result {
 
-                            // Locate a suitable next piece to download (if there is an active connection)
-                            next_piece = find_piece(&active_connection, &board);
+                                // download failed
+                                Err(_) => {
+                                    log(format!("Failed to download piece {piece_id} from {}, marking as errored and retrying", connection.address));
 
-                            // If there is no suitable piece, then mark the peer as superceded and release it
-                            if next_piece.is_none() {
-                                println!("[{}] {} has no more needed pieces, releasing", worker_id, address);
-                                active_connection = None;
-                                peer.state = PeerState::Superceded;
-
-                            // If this connection has been used more than a maximum number of times in a row, then release it
-                            } else if uses >= MAX_PEER_USES {
-                                println!("[{}] {} has been overused, releasing", worker_id, address);
-                                active_connection = None;
-                                peer.state = PeerState::Active(false);
-                            }
-                        }
-
-                        // Update peer on board
-                        board
-                            .peers
-                            .entry(address.clone())
-                            .and_modify(|entry| *entry = peer);
-                    });
-
-                    if active_connection.is_none() {
-                        println!("[{}] Acquiring new peer", worker_id);
-
-                        // If there is no active peer, find the peer with the best connection that's available to connect to
-                        let mut potential_peers = board
-                            .peers
-                            .iter()
-                            .filter(|(_, peer)| matches!(peer.state, PeerState::Fresh | PeerState::Active(false))).collect::<Vec<_>>();
-                        
-                        potential_peers.sort_by(|(_, peer_a), (_, peer_b)| {
-                            peer_b.performance.unwrap_or(f64::MAX)
-                                .partial_cmp(&peer_a.performance.unwrap_or(f64::MAX))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        });
-
-                        // Attempt to connect to it
-                        let potential_peer = potential_peers.first()
-                            .map(|(address, _)| {
-                                (
-                                    PeerConnection::new(
-                                        (*address).clone(),
-                                        board.meta_info.clone(),
-                                        board.peer_id.clone(),
-                                    )
-                                    .and_then(
-                                        |mut connection| {
-                                            connection.initialize()?;
-                                            Ok(connection)
-                                        },
-                                    ),
-                                    (*address).clone(),
-                                )
-                            });
-
-                        match potential_peer {
-
-                            // If no peer was found, wait a bit and find a new peer
-                            None => {
-                                println!("[{}] No available peers found, waiting", worker_id);
-                                drop(board);
-                                sleep(100);
-                                continue;
-                            }
-
-                            // If the peer failed to connect, mark it as Errored and find a new peer
-                            Some((Err(_), address)) => {
-                                println!("[{}] Failed to connect to peer at {}, marking and looking for new peer", worker_id, address);
-                                board
-                                    .peers
-                                    .entry(address.clone())
-                                    .and_modify(|peer| peer.state = PeerState::Error);
-                                continue;
-                            }
-
-                            // On successful connection, mark the peer as active and set it as the active peer
-                            Some((Ok(connection), address)) => {
-                                println!("[{}] Connected to {}", worker_id, address);
-                                board
-                                    .peers
-                                    .entry(address.clone())
-                                    .and_modify(|peer| peer.state = PeerState::Active(true));
-                                active_connection = Some(connection);
-
-                                // Locate a new piece to download
-                                next_piece = find_piece(&active_connection, &board);
-
-                                // If no pieces are available, mark connection as superceded and look for another peer
-                                if next_piece.is_none() {
-                                    println!("[{}] {} has no more needed pieces, releasing", worker_id, address);
-                                    active_connection = None;
+                                    // mark peer as errored
                                     board
                                         .peers
-                                        .entry(address.clone())
-                                        .and_modify(|peer| peer.state = PeerState::Superceded);
-                                    continue;
+                                        .entry(connection.address.clone())
+                                        .and_modify(|peer| peer.state = PeerState::Error);
+
+                                    // mark piece as unfetched
+                                    board.pieces.get_mut(piece_id).map(|piece| {
+                                        piece.state = PieceState::Unfetched;
+                                    });
+
+                                    // try again
+                                    LoopAction::Continue
+                                }
+
+                                // download succeeded
+                                Ok(data) => {
+                                    log(format!("Finished downloading piece {piece_id} from {}", connection.address));
+
+                                    // update peer performance
+                                    board.peers.entry(connection.address.clone()).and_modify(
+                                        |peer| {
+                                            peer.benchmarks.push(Benchmark {
+                                                bytes: data.len(),
+                                                duration_millis: duration,
+                                            });
+                                            let performance = peer.update_performance();
+                                            log(format!("{} has a performance of {:.4} MB/s", connection.address, performance / MB_S ));
+                                        },
+                                    );
+
+                                    // check hash
+                                    board.pieces.get_mut(piece_id).map_or(
+                                        LoopAction::Continue,
+                                        |piece| {
+                                            if piece.hash == sha1_hash(&data) {
+
+                                                // if hash matches, store data & keep peer for next loop
+                                                piece.state = PieceState::Fetched(data);
+                                                LoopAction::Pass
+                                            } else {
+                                                log(format!("Hash of piece {piece_id} does not match, dropping data"));
+
+                                                // if hash does not match, mark piece as unfetched
+                                                piece.state = PieceState::Unfetched;
+                                                LoopAction::Continue
+                                            }
+                                        },
+                                    )
                                 }
                             }
-                        }
+                        })
+                        .unwrap();
+                    // ! end of third mutual exclusion zone
+
+                    if matches!(download_result, LoopAction::Continue) {
+                        continue;
                     }
 
-                    // Mark chosen piece as in progress
-                    next_piece.as_ref().map(|piece_id| {
-                        board.pieces.get_mut(*piece_id).map(|piece| {
-                            piece.state = PieceState::InProgress;
-                        });
-                    });
-
-                    // Release board pre-fetch
-                    drop(board);
-
-                    // Download chosen piece from chosen peer, recording download time
-                    let download_result = active_connection.as_mut().and_then(|connection| {
-                        next_piece
-                            .as_ref()
-                            .map(|piece_id| {
-                                println!("[{}] Downloading piece {} from {}", worker_id, piece_id, connection.address);
-                                let start_time = SystemTime::now();
-                                let result = connection.download_piece(*piece_id as u32);
-                                let duration = SystemTime::now().duration_since(start_time).unwrap().as_millis() as usize;
-                                result.map(|data| (data, duration))
-                            })
-                    });
-
-                    // Check result of download
-                    match download_result {
-
-                        // No download occurred: this should never happen
-                        None => {
-                            println!("[{}] Nothing was downloaded; this should never happen", worker_id);
-                        }
-
-                        // Error during download
-                        Some(Err(_)) => {
-
-                            // Reaquire board
-                            println!("[{}] Acquiring corkboard post-fetch", worker_id);
-                            let mut board = corkboard.write().unwrap();
-
-                            // Mark peer as errored
-                            active_connection.as_ref().map(|connection| { 
-                                println!("[{}] connection to {} interrupted, marking as errored and dropping", worker_id, connection.address);
-                                board
-                                    .peers
-                                    .entry(connection.address.clone())
-                                    .and_modify(|peer| peer.state = PeerState::Error);
-                            });
-
-                            // Release connection
-                            active_connection = None;
-
-                            // Re-mark piece as unfetched
-                            next_piece.as_ref().map(|piece_id| {
-                                board.pieces.get_mut(*piece_id).map(|piece| {
-                                    piece.state = PieceState::Unfetched;
-                                });
-                            });
-
-                            // Release board post-fetch
-                            drop(board);
-                        }
-
-                        // Piece downloaded successfully
-                        Some(Ok((data, duration))) => {
-
-                            active_connection.as_ref().map(|connection| {
-                                next_piece.as_ref().map(|piece_id: &usize| {
-                                    println!("[{}] finished downloading piece {} from {}", worker_id, piece_id, connection.address);
-                                })
-                            });
-
-                            // Reaquire board
-                            println!("[{}] Acquiring corkboard post-fetch", worker_id);
-                            let mut board = corkboard.write().unwrap();
-
-                            // Record benchmark of network performance on peer
-                            active_connection.as_ref().map(|connection| {
-                                board.peers.entry(connection.address.clone()).and_modify(|peer| {
-                                    peer.benchmarks.push(Benchmark { bytes: data.len(), duration_millis: duration });
-                                    peer.update_performance();
-                                    println!("[{}] {} has a download performance of {:.4} MB/s", worker_id, connection.address, peer.performance.unwrap_or(0.0) / MB_S);
-                                });
-                            });
-                            
-                            // Check piece hash
-                            next_piece.as_ref().map(|piece_id: &usize| {
-                                board.pieces.get_mut(*piece_id).map(|piece| {
-                                    piece.hash == sha1_hash(&data)
-                                }).map(|hash_matches| {
-                                    if hash_matches {
-    
-                                        // If hash matches, mark piece as downloaded
-                                        println!("[{}] Storing piece {}", worker_id, piece_id);
-                                        board.pieces.get_mut(*piece_id).map(|piece| {
-                                            piece.state = PieceState::Fetched(data);
-                                        });
-                                        board.notify_piece_completion();
-                                    } else {
-    
-                                        println!("[{}] Hash of downloaded piece {} does not match; discarding", worker_id, piece_id);
-                                        // If hash does not match, discard data and re-mark piece as unfetched
-                                        board.pieces.get_mut(*piece_id).map(|piece| {
-                                            piece.state = PieceState::Unfetched;
-                                        });
-
-                                        // Mark peer as errored? (unsure if necessary)
-                                        // active_connection.as_ref().map(|connection| {
-                                        //     board.peers.entry(connection.address.clone()).and_modify(|peer| {
-                                        //         peer.state = PeerState::Error;
-                                        //     })
-                                        // });
-                                    }
-                                });
-                            });
-
-                            // Release board post-fetch
-                            drop(board);
-                        }
-                    }
+                    active_connection = Some(connection);
+                    uses += 1;
                 }
-                println!("[{}] Exiting", worker_id);
+                log(format!("Exiting"));
             })
         })
         .collect::<Vec<_>>();
 
     // wait for workers to finish
     println!("Waiting for workers to finish");
-    workers.into_iter().for_each(|worker| worker.join().unwrap());
+    workers
+        .into_iter()
+        .for_each(|worker| worker.join().unwrap());
 
     // send kill signal to watchdog (may not be directly necessary; the channel dropping should kill the watchdog automatically)
     println!("Killing watchdog");
@@ -494,10 +546,17 @@ pub fn corkboard_download(
     // collect data
     println!("Collecting data");
     let board = corkboard.read().unwrap();
-    let data = board.pieces.iter().map(|piece| match &piece.state {
-        PieceState::Fetched(data) => Ok(data),
-        _ => Err(bterror!("Unfetched piece data remains!"))
-    }).collect::<Result<Vec<_>, _>>()?.into_iter().flatten().collect::<Vec<&u8>>();
+    let data = board
+        .pieces
+        .iter()
+        .map(|piece| match &piece.state {
+            PieceState::Fetched(data) => Ok(data),
+            _ => Err(bterror!("Unfetched piece data remains!")),
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<&u8>>();
 
     // this is really memory inefficient... need to figure out a better way to save and collect data
     println!("Done");
