@@ -462,8 +462,8 @@ pub fn corkboard_download(
                             match result {
 
                                 // download failed
-                                Err(_) => {
-                                    log(format!("Failed to download piece {piece_id} from {}, marking as errored and retrying", connection.address));
+                                Err(err) => {
+                                    log(format!("Failed to download piece {piece_id} from {}: {err}", connection.address));
 
                                     // mark peer as errored
                                     board

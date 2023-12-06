@@ -195,7 +195,7 @@ fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "peers", "torrents/invincible.torrent"]);
+    // let args = Args::parse_from(["_", "download-v2", "torrents/invincible.torrent", "-w32"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {

@@ -20,11 +20,15 @@ const CHUNK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
 enum PeerMessage {
-    Bitfield(BitFieldMessage),
-    Interested,
+    Choke,
     Unchoke,
+    Interested,
+    NotInterested,
+    Have(u32),
+    Bitfield(BitFieldMessage),
     Request(RequestMessage),
     Piece(PieceMessage),
+    Cancel(CancelMessage),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,6 +38,13 @@ struct BitFieldMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct RequestMessage {
+    index: u32,
+    begin: u32,
+    length: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct CancelMessage {
     index: u32,
     begin: u32,
     length: u32,
@@ -50,6 +61,13 @@ impl PeerMessage {
     /// Decode a peer message from a byte array.
     fn decode(bytes: &[u8]) -> Result<Self, BitTorrentError> {
         match bytes.get(0) {
+            Some(0u8) => Ok(Self::Choke),
+            Some(1u8) => Ok(Self::Unchoke),
+            Some(2u8) => Ok(Self::Interested),
+            Some(3u8) => Ok(Self::NotInterested),
+            Some(4u8) => Ok(Self::Have(u32::from_be_bytes(
+                bytes[1..5].try_into().unwrap(),
+            ))),
             Some(5u8) => Ok(Self::Bitfield(BitFieldMessage {
                 bitfield: bytes[1..]
                     .iter()
@@ -57,8 +75,6 @@ impl PeerMessage {
                     .flat_map(decode_bitfield_be)
                     .collect(),
             })),
-            Some(2u8) => Ok(Self::Interested),
-            Some(1u8) => Ok(Self::Unchoke),
             Some(6u8) => Ok(Self::Request(RequestMessage {
                 index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
                 begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
@@ -69,13 +85,24 @@ impl PeerMessage {
                 begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
                 block: bytes[9..].to_vec(),
             })),
-            _ => Err(bterror!("Invalid peer message")),
+            Some(8u8) => Ok(Self::Cancel(CancelMessage {
+                index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
+                begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
+                length: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
+            })),
+            Some(byte) => Err(bterror!("Invalid peer message: {byte}")),
+            None => Err(bterror!("Invalid peer message: empty")),
         }
     }
 
     /// Encode a peer message into a byte array.
     fn encode(&self) -> Result<Vec<u8>, BitTorrentError> {
         let base_message: Vec<u8> = match self {
+            Self::Choke => vec![0],
+            Self::Unchoke => vec![1],
+            Self::Interested => vec![2],
+            Self::NotInterested => vec![3],
+            Self::Have(index) => vec![4].into_iter().chain(index.to_be_bytes()).collect(),
             Self::Bitfield(bitfield) => vec![5]
                 .into_iter()
                 .chain(
@@ -85,8 +112,6 @@ impl PeerMessage {
                         .map(|bits| encode_bitfield_be(bits.try_into().unwrap())),
                 )
                 .collect(),
-            Self::Interested => vec![2],
-            Self::Unchoke => vec![1],
             Self::Request(req) => vec![6]
                 .into_iter()
                 .chain(req.index.to_be_bytes())
@@ -98,6 +123,12 @@ impl PeerMessage {
                 .chain(piece.index.to_be_bytes())
                 .chain(piece.begin.to_be_bytes())
                 .chain(piece.block.clone())
+                .collect(),
+            Self::Cancel(cancel) => vec![8]
+                .into_iter()
+                .chain(cancel.index.to_be_bytes())
+                .chain(cancel.begin.to_be_bytes())
+                .chain(cancel.length.to_be_bytes())
                 .collect(),
         };
         let length = base_message.len() as u32;
@@ -148,7 +179,7 @@ impl PeerConnection {
             &HandshakeMessage::new(&self.meta_info, &self.peer_id)?,
         )?;
 
-        // wait for bitfield
+        // accept bitfield
         self.bitfield = match self.await_peer_message()? {
             PeerMessage::Bitfield(bitfield) => {
                 bitfield.bitfield[..self.meta_info.num_pieces()].to_vec()
@@ -160,10 +191,7 @@ impl PeerConnection {
         self.send_peer_message(&PeerMessage::Interested)?;
 
         // wait for unchoke
-        match self.await_peer_message()? {
-            PeerMessage::Unchoke => (),
-            message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
-        }
+        while !matches!(self.await_peer_message()?, PeerMessage::Unchoke) {}
 
         Ok(())
     }
@@ -175,32 +203,47 @@ impl PeerConnection {
             .min(*info_field!(&self.meta_info.info, piece_length) as u32);
 
         // send requests
-        let num_chunks = (0..chunk_size)
+        let mut responses = (0..chunk_size)
             .step_by(CHUNK_SIZE as usize)
-            .map(|chunk_offset| {
-                let message_length = (chunk_size - chunk_offset).min(CHUNK_SIZE);
-                self.send_peer_message(&PeerMessage::Request(RequestMessage {
-                    index: piece_id,
-                    begin: chunk_offset,
-                    length: message_length,
-                }))
-            })
-            .collect::<Result<Vec<()>, BitTorrentError>>()?
-            .into_iter()
-            .count();
-
-        // recieve chunks
-        let mut responses = (0..num_chunks)
-            .map(|_| match self.await_peer_message()? {
-                PeerMessage::Piece(piece) => {
-                    if piece.index != piece_id {
-                        return Err(bterror!("Received piece with wrong index"));
-                    }
-                    Ok(piece)
+            .collect::<Vec<_>>().chunks(8)
+            .map(|chunk_offsets| {
+                for chunk_offset in chunk_offsets.iter() {
+                    let message_length = (chunk_size - chunk_offset).min(CHUNK_SIZE);
+                    self.send_peer_message(&PeerMessage::Request(RequestMessage {
+                        index: piece_id,
+                        begin: *chunk_offset,
+                        length: message_length,
+                    }))?;
                 }
-                message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
+
+                let mut choked = false;
+                let mut pieces = Vec::new();
+
+                loop {
+                    match self.await_peer_message()? {
+                        PeerMessage::Piece(piece) => {
+                            pieces.push(piece);
+                        }
+                        PeerMessage::Choke => {
+                            println!("Choked!!");
+                            choked = true;
+                        }
+                        PeerMessage::Unchoke => {
+                            println!("Unchoked~");
+                            choked = false;
+                        }
+                        message => return Err(bterror!("Unexpected message from peer: {:?}", message)),
+                    }
+                    if !choked && pieces.len() == chunk_offsets.len() {
+                        break;
+                    }
+                }
+                Ok(pieces)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<Vec<PieceMessage>>, BitTorrentError>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
 
         // coallate chunks
         responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
@@ -225,6 +268,7 @@ impl PeerConnection {
 
     /// Wait for a peer message to arrive from the peer and return it.
     fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
+        // dbg!("reading");
         let buf = read_n_bytes(&mut self.stream, 4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
         let buf = read_n_bytes(&mut self.stream, length as usize)?;
@@ -233,9 +277,11 @@ impl PeerConnection {
 
     /// Send a peer message `message` to the peer.
     fn send_peer_message(&mut self, message: &PeerMessage) -> Result<(), BitTorrentError> {
+        // dbg!(message);
         self.stream
             .write(&message.encode()?)
             .map_err(|err| bterror!("Error sending peer message: {}", err))?;
+        // dbg!("sent");
         Ok(())
     }
 
@@ -296,7 +342,6 @@ pub fn download_file(
         let meta_info = meta_info.clone();
         let peer_id = peer_id.to_string();
         thread::spawn(move || {
-
             // initialize connection
             let mut connection = PeerConnection::new(peer, meta_info, peer_id)?;
             connection.initialize()?;
@@ -307,7 +352,6 @@ pub fn download_file(
                 match result {
                     Ok(piece_id) => {
                         if connection.has(piece_id as usize) {
-
                             // download piece
                             let piece = connection.download_piece(piece_id);
                             match piece {
@@ -323,7 +367,6 @@ pub fn download_file(
                                 }
                             }
                         } else {
-
                             // send back to queue if not available
                             worker_send
                                 .lock()
