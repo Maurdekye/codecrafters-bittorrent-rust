@@ -6,13 +6,13 @@ use std::{io::prelude::*, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use crate::info_field;
+use crate::multimodal_tracker::Tracker;
 use crate::util::{decode_bitfield_be, encode_bitfield_be};
 use crate::{
     bterror,
     error::BitTorrentError,
     handshake::{send_handshake, HandshakeMessage},
     info::MetaInfo,
-    tracker::query_tracker,
     util::{bytes_to_hex, read_n_bytes, sha1_hash},
 };
 
@@ -253,7 +253,8 @@ pub fn download_piece_from_peer(
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let tracker_response = query_tracker(meta_info, peer_id, port)?;
+    let mut tracker = Tracker::new(&meta_info)?;
+    let tracker_response = tracker.query(&peer_id, port)?;
     let peers = tracker_response.peers()?;
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
     let mut connection = PeerConnection::new(*peer, meta_info.clone(), peer_id.to_string())?;
@@ -268,7 +269,8 @@ pub fn download_file(
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let tracker_response = query_tracker(&meta_info, peer_id, port)?;
+    let mut tracker = Tracker::new(&meta_info)?;
+    let tracker_response = tracker.query(&peer_id, port)?;
     let peers = tracker_response.peers()?;
 
     let (worker_send, worker_recieve) = mpsc::channel();

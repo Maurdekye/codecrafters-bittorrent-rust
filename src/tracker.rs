@@ -20,13 +20,13 @@ pub enum TrackerResponse {
 #[derive(Deserialize)]
 pub struct SuccessfulTrackerResponse {
     pub interval: usize,
-    peers: String,
+    pub peers: String,
 }
 
 #[derive(Deserialize)]
 pub struct FailureTrackerResponse {
     #[serde(rename = "failure reason")]
-    failure_reason: String,
+    pub failure_reason: String,
 }
 
 impl SuccessfulTrackerResponse {
@@ -60,6 +60,9 @@ pub fn querystring_encode(bytes: &[u8]) -> String {
 }
 
 /// Query the tracker for a list of peers for the torrent associated with the `meta_info` object passed.
+/// deprecated; use `multimodal_tracker::Tracker` instead 
+#[deprecated = "use `multimodal_tracker::Tracker` instead"]
+#[allow(unused)]
 pub fn query_tracker(
     meta_info: &MetaInfo,
     peer_id: &str,
@@ -72,7 +75,7 @@ pub fn query_tracker(
             "{}?{}",
             meta_info.preferred_tracker(),
             [
-                ("info_hash", querystring_encode(&meta_info.hash()?)),
+                ("info_hash", querystring_encode(&meta_info.info_hash()?)),
                 ("peer_id", peer_id.to_string()),
                 ("port", format!("{}", port)),
                 ("uploaded", "0".to_string()),

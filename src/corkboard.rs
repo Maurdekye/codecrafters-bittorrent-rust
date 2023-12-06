@@ -6,11 +6,12 @@ use std::{
 };
 
 use crate::{
-    download::PeerConnection, error::BitTorrentError, info::MetaInfo, tracker::query_tracker,
-    util::{sleep, sha1_hash}, bterror,
+    download::PeerConnection, error::BitTorrentError, info::MetaInfo,
+    util::{sleep, sha1_hash}, bterror, multimodal_tracker::Tracker,
 };
 
 const MAX_PEER_USES: usize = 5;
+const WATCHDOG_RETRY_INTERVAL: usize = 5;
 /// conversion factor of bytes / millisecond to mebibites / second
 const MB_S: f64 = 1048.576;
 
@@ -20,13 +21,11 @@ struct Corkboard {
     port: u16,
     pieces: Vec<Piece>,
     remaining_pieces: usize,
-    watchdog_interval: usize,
     peers: HashMap<SocketAddrV4, Peer>,
 }
 
 impl Corkboard {
     fn new(meta_info: MetaInfo, peer_id: String, port: u16) -> Result<Self, BitTorrentError> {
-        let tracker_response = query_tracker(&meta_info, &peer_id, port)?;
         Ok(Self {
             remaining_pieces: meta_info.num_pieces(),
             pieces: meta_info
@@ -34,12 +33,7 @@ impl Corkboard {
                 .into_iter()
                 .map(Piece::new)
                 .collect(),
-            peers: tracker_response
-                .peers()?
-                .into_iter()
-                .map(|address| (address, Peer::new()))
-                .collect(),
-            watchdog_interval: tracker_response.interval,
+            peers: HashMap::new(),
             meta_info,
             peer_id,
             port,
@@ -124,7 +118,7 @@ struct Benchmark {
 /// connect to and which piece to acquire, and once afterwards to validate and submit their
 /// successful download to the board.
 pub fn corkboard_download(
-    meta_info: &MetaInfo,
+    meta_info: MetaInfo,
     peer_id: &str,
     port: u16,
     workers: usize,
@@ -133,7 +127,7 @@ pub fn corkboard_download(
     // create corkboard
     println!("Initializing Corkboard");
     let corkboard = Arc::new(RwLock::new(Corkboard::new(
-        meta_info.clone(),
+        meta_info,
         peer_id.to_string(),
         port,
     )?));
@@ -147,41 +141,64 @@ pub fn corkboard_download(
     let watchdog_board = corkboard.clone();
     let watchdog = thread::spawn(move || {
         println!("[W] Watchdog init");
-        let mut interval = watchdog_board.read().unwrap().watchdog_interval;
-        loop {
+        // fetch board to get a copy of meta_info
+        let board = watchdog_board.read().unwrap();
+        let meta_info = board.meta_info.clone();
+        drop(board);
 
-            // wait on watchdog alarm
-            println!("[W] Waiting {} s", interval);
-            match watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)) {
-                Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
-                _ => (),
-            }
+        println!("[W] Initializing tracker connection");
+        let mut tracker = Tracker::new(&meta_info).expect("Tracker unable to connect!");
+        loop {
 
             // update peer information
             println!("[W] Acquiring corkboard");
             let mut board = watchdog_board.write().unwrap();
 
             println!("[W] Updating peer list");
-            match query_tracker(&board.meta_info, &board.peer_id, board.port).and_then(|response| {
-                interval = response.interval;
-                response.peers()
+            let interval = match tracker.query(&board.peer_id, board.port).and_then(|response| {
+                Ok((response.peers()?, response.interval))
             }) {
-                Ok(peers) => {
+                Ok((mut peers, interval)) => {
                     board.peers.iter_mut().for_each(|(address, peer)| {
-                        peer.state = if peer.state != PeerState::Error && peers.contains(address) { 
-                            PeerState::Fresh 
-                        } else { 
-                            PeerState::Inactive 
-                        };
-                    })
+                        if peer.state != PeerState::Error {
+                            peer.state = match peers
+                                .iter()
+                                .enumerate()
+                                .find(|(_, peer)| *peer == address)
+                                .map(|(i, _)| i) 
+                                {
+                                Some(i) => {
+                                    peers.remove(i);
+                                    PeerState::Fresh
+                                }
+                                None => PeerState::Inactive
+                            }
+                        }
+                    });
+                    board
+                        .peers
+                        .extend(
+                            peers
+                                .into_iter()
+                                .map(|address| (address, Peer::new()))
+                            );
+                    interval
                 }
                 Err(err) => {
                     println!("[W] Error querying tracker: {}", err);
+                    WATCHDOG_RETRY_INTERVAL
                 }
-            }
+            };
 
             // release board
             drop(board);
+
+            // wait on watchdog alarm
+            println!("[W] Waiting {}s", interval);
+            match watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)) {
+                Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
+                _ => (),
+            }
         }
         println!("[W] Exiting");
     });

@@ -71,7 +71,7 @@ impl MetaInfo {
     }
 
     /// Compute the SHA1 hash of the info dictionary.
-    pub fn hash(&self) -> Result<[u8; 20], BitTorrentError> {
+    pub fn info_hash(&self) -> Result<[u8; 20], BitTorrentError> {
         let as_object = match &self.info {
             Info::SingleFile(single_file) => to_value(single_file),
             Info::MultiFile(multi_file) => to_value(multi_file),

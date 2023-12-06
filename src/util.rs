@@ -1,5 +1,5 @@
 use sha1::{Digest, Sha1};
-use std::{io::Read, net::TcpStream};
+use std::{io::Read, net::UdpSocket};
 
 use crate::{bterror, error::BitTorrentError};
 
@@ -9,7 +9,7 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// Read n bytes from a TcpStream and return them as a Vec<u8>.
-pub fn read_n_bytes(stream: &mut TcpStream, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
+pub fn read_n_bytes<T: Read>(stream: &mut T, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
     let mut bytes = Vec::new();
     while n > 0 {
         let mut buf = vec![0u8; n];
@@ -20,6 +20,14 @@ pub fn read_n_bytes(stream: &mut TcpStream, mut n: usize) -> Result<Vec<u8>, Bit
         n -= num_read;
     }
     Ok(bytes)
+}
+
+pub fn read_datagram(stream: &mut UdpSocket) -> Result<Vec<u8>, BitTorrentError> {
+    let mut buf = [0u8; 65536];
+    let num_read = stream
+        .recv(&mut buf)
+        .map_err(|err| bterror!("Error reading udp datagram: {}", err))?;
+    Ok(buf[..num_read].to_vec())
 }
 
 /// Decode a bitfield from a byte in big-endian order.

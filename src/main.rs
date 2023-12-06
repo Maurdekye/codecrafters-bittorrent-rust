@@ -8,8 +8,8 @@ use clap::Parser;
 use download::download_piece_from_peer;
 use error::BitTorrentError;
 use handshake::{send_handshake, HandshakeMessage};
+use multimodal_tracker::Tracker;
 use regex::Regex;
-use tracker::query_tracker;
 
 use crate::{
     corkboard::corkboard_download, decode::Decoder, download::download_file, info::MetaInfo,
@@ -23,6 +23,7 @@ mod encode;
 mod error;
 mod handshake;
 mod info;
+mod multimodal_tracker;
 mod tracker;
 mod util;
 
@@ -143,7 +144,7 @@ struct DownloadV2Args {
     torrent_file: String,
 
     /// Output directory
-    #[arg(short, long, value_parser = pathbuf_parse)]
+    #[arg(short, long, value_parser = pathbuf_parse, default_value = "downloads/")]
     output: PathBuf,
 
     /// Peer ID for handshake
@@ -194,7 +195,7 @@ fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "download", "-o", "sample.txt", "sample.torrent"]);
+    // let args = Args::parse_from(["_", "peers", "torrents/invincible.torrent"]);
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
@@ -204,7 +205,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Info(info_args) => {
             let meta_info = MetaInfo::from_file(&info_args.torrent_file)?;
-            let info_hash = meta_info.hash()?;
+            let info_hash = meta_info.info_hash()?;
             println!("Tracker URL: {}", meta_info.announce);
             println!("Length: {}", meta_info.length());
             println!("Info Hash: {}", bytes_to_hex(&info_hash));
@@ -219,7 +220,8 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Peers(peers_args) => {
             let meta_info = MetaInfo::from_file(&peers_args.torrent_file)?;
-            let tracker_info = query_tracker(&meta_info, &peers_args.peer_id, peers_args.port)?;
+            let mut tracker = Tracker::new(&meta_info)?;
+            let tracker_info = tracker.query(&peers_args.peer_id, peers_args.port)?;
             for sock in tracker_info.peers()? {
                 println!("{}", sock);
             }
@@ -260,7 +262,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::DownloadV2(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
             let full_file = corkboard_download(
-                &meta_info,
+                meta_info.clone(),
                 &download_args.peer_id,
                 download_args.port,
                 download_args.workers,
