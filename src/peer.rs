@@ -3,6 +3,7 @@ use std::{fmt::Display, net::SocketAddrV4};
 use crate::info::MetaInfo;
 
 pub mod tcp;
+pub mod utp;
 pub mod message; 
 
 pub trait PeerConnection {

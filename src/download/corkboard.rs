@@ -1,25 +1,30 @@
 use std::{
     collections::HashMap,
-    net::SocketAddrV4,
+    net::{SocketAddrV4, TcpListener, SocketAddr},
     sync::{
         mpsc::{channel, RecvTimeoutError},
         Arc, RwLock,
     },
     thread::{self},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime}, fmt::format, io::Write,
 };
+
+use anyhow::Context;
 
 use crate::{
     bterror,
     error::BitTorrentError,
     info::MetaInfo,
-    peer::PeerConnection,
+    peer::{PeerConnection, message::{HandshakeMessage, BitfieldMessage, PeerMessage, PieceMessage}, tcp::TcpPeer},
     tracker::multimodal::Tracker,
-    util::{sha1_hash, sleep, timestr},
+    util::{sha1_hash, sleep, timestr, read_n_bytes},
 };
 
-const MAX_PEER_USES: usize = 5;
-const WATCHDOG_RETRY_INTERVAL: usize = 5;
+const MAX_PEER_USES: usize = 5; // seconds
+const WATCHDOG_RETRY_INTERVAL: u64 = 5; // seconds
+const EMPTY_PEER_WAIT: u64 = 1000; // milliseconds
+const MONITOR_INTERVAL: u64 = 5; // seconds
+
 /// conversion factor of bytes / millisecond to mebibites / second
 const MB_S: f64 = 1048.576;
 
@@ -157,6 +162,66 @@ pub fn corkboard_download<T: PeerConnection>(
         corkboard.clone().read().unwrap().pieces.len(),
     ));
 
+    let (monitor_notify, monitor_alarm) = channel();
+
+    log(format!("Starting monitor"));
+    let monitor_board = corkboard.clone();
+    let monitor = thread::spawn(move || {
+        let log = |msg: String| println!("[{}][M] {msg}", timestr());
+
+        log(format!("Monitor init"));
+        loop {
+            monitor_board.read().map(|board| {
+
+                // collect peer statistics
+                let total_peers = board.peers.len();
+                let fresh_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Fresh)).count();
+                let connecting_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Connecting)).count();
+                let active_acquired_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Active(true))).count();
+                let active_unaquired_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Active(false))).count();
+                let total_active = active_acquired_count + active_unaquired_count;
+                let superceded_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Superceded)).count();
+                let error_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Error)).count();
+                
+                // collect piece statistics
+                let total_pieces = board.pieces.len();
+                let unfetched_count = board.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Unfetched)).count();
+                let in_progress_count = board.pieces.iter().filter(|piece| matches!(piece.state, PieceState::InProgress)).count();
+                let fetched_count = board.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Fetched(_))).count();
+
+                // print results
+                log(format!(""));
+                log(format!(">>>>>>>>>>>>><<<<<<<<<<<<<"));
+                log(format!(""));
+                log(format!("Peer Stats:"));
+                log(format!("Total Peers:   {total_peers}"));
+                log(format!("Fresh:         {fresh_count}"));
+                log(format!("Connecting:    {connecting_count}"));
+                log(format!("Active:        {total_active} ({active_acquired_count} + {active_unaquired_count})"));
+                log(format!("Superceded:    {superceded_count}"));
+                log(format!("Error:         {error_count}"));
+                log(format!(""));
+                log(format!("Piece Stats:"));
+                log(format!("Total Pieces:  {total_pieces}"));
+                log(format!("Unfetched:     {unfetched_count}"));
+                log(format!("In Progress:   {in_progress_count}"));
+                log(format!("Fetched:       {fetched_count}"));
+                log(format!(""));
+                log(format!(">>>>>>>>>>>>><<<<<<<<<<<<<"));
+                log(format!(""));
+
+            }).unwrap();
+
+            // wait on alarm
+            if matches!(
+                monitor_alarm.recv_timeout(Duration::from_secs(MONITOR_INTERVAL)), 
+                Err(RecvTimeoutError::Disconnected) | Ok(_)
+            ) {
+                break;
+            }
+        }
+    });
+
     let (watchdog_notify, watchdog_alarm) = channel();
 
     // start peer update watchdog
@@ -205,7 +270,7 @@ pub fn corkboard_download<T: PeerConnection>(
                     board
                         .peers
                         .extend(peers.into_iter().map(|address| (address, Peer::new())));
-                    interval
+                    interval as u64
                 }
                 Err(err) => {
                     log(format!("Error querying tracker: {}", err));
@@ -219,7 +284,7 @@ pub fn corkboard_download<T: PeerConnection>(
             // wait on watchdog alarm
             log(format!("Waiting {interval}s"));
             if matches!(
-                watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)),
+                watchdog_alarm.recv_timeout(Duration::from_secs(interval)),
                 Err(RecvTimeoutError::Disconnected) | Ok(_)
             ) {
                 break;
@@ -235,6 +300,8 @@ pub fn corkboard_download<T: PeerConnection>(
             let corkboard = corkboard.clone();
             thread::spawn(move || {
                 let log = |msg: String| println!("[{}][{worker_id}] {msg}", timestr());
+                // stagger startup to prevent thrashing
+                sleep((worker_id * 1000) as u64);
 
                 log(format!("Worker init"));
                 let (meta_info, peer_id) = corkboard
@@ -330,7 +397,7 @@ pub fn corkboard_download<T: PeerConnection>(
                                             // if no peer was found, wait a bit and try again
                                             None => {
                                                 log(format!("No peers found, waiting and retrying"));
-                                                PeerSearchResult::WaitThenRefetch(1000)
+                                                PeerSearchResult::WaitThenRefetch(EMPTY_PEER_WAIT)
                                             },
                                         }
                                     }
@@ -524,19 +591,119 @@ pub fn corkboard_download<T: PeerConnection>(
         })
         .collect::<Vec<_>>();
 
+    // start seeders
+    log(format!("Starting seeders"));
+    let seeder_board = corkboard.clone();
+    let _ = thread::spawn(move || {
+        let log = |msg: String| println!("[{}][S] {msg}", timestr());
+
+        log(format!("Seeder init"));
+
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}")).unwrap();
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let address = stream.peer_addr().unwrap();
+                    let connection_board = seeder_board.clone();
+
+                    log(format!("New connection from {address}"));
+                    thread::spawn(move || {
+                        let log = |msg: String| println!("[{}][{}] {msg}", timestr(), address);
+                        let (meta_info, peer_id) = connection_board.read().map(|board| (board.meta_info.clone(), board.peer_id.clone())).unwrap();
+                        
+                        // set up connection
+                        let mut connection = TcpPeer {
+                            stream,
+                            address: match address {
+                                SocketAddr::V4(addr) => addr,
+                                _ => return Err::<(), BitTorrentError>(bterror!("Ipv6 not supported"))
+                            },
+                            meta_info,
+                            peer_id,
+                            bitfield: Vec::new(),
+                        };
+
+                        // recieve handshake
+                        let handshake = HandshakeMessage::decode(&read_n_bytes(&mut connection.stream, 68)?)?;
+                        log(format!("{address} peer id: {}", std::str::from_utf8(&handshake.peer_id).context("Peer id not bytes")?));
+
+                        // send response handshake
+                        connection.handshake()?;
+
+                        // send bitfield
+                        let bitfield = connection_board
+                            .read()
+                            .map(|board| board.pieces
+                                .iter()
+                                .map(|piece| matches!(piece.state, PieceState::Fetched(_)))
+                            .collect::<Vec<_>>()
+                        ).unwrap();
+                        let bitfield_message = PeerMessage::Bitfield(BitfieldMessage { bitfield });
+                        connection.send_peer_message(&bitfield_message)?;
+
+                        // wait for interested
+                        loop {
+                            match connection.await_peer_message()? {
+                                PeerMessage::Interested => break,
+                                PeerMessage::NotInterested => return Err(bterror!("{} was not interested", address)),
+                                _ => {}
+                            }
+                        }
+
+                        // send unchoke
+                        connection.send_peer_message(&PeerMessage::Unchoke)?;
+
+                        // respond to data requests
+                        loop {
+                            match connection.await_peer_message()? {
+                                PeerMessage::Request(request) => {
+                                    let piece_id = request.index;
+                                    let chunk_data: Vec<u8> = connection_board.read().map(|board| {
+                                        let piece_data = match board.pieces.get(piece_id as usize) {
+                                            Some(Piece { state: PieceState::Fetched(data), .. }) => data,
+                                            _ => return Err(bterror!("Piece {piece_id} is not fetched")),
+                                        };
+                                        Ok(piece_data
+                                            .get((request.begin as usize)..((request.begin + request.length) as usize))
+                                            .context("Invalid chunk data")?.into_iter().copied().collect())
+                                    }).unwrap()?;
+                                    connection.send_peer_message(&PeerMessage::Piece(PieceMessage {
+                                        index: request.index,
+                                        begin: request.begin,
+                                        block: chunk_data,
+                                    }))?;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+                Err(err) => {
+                    log(format!("Tcp Client connect error: {}", err))
+                }
+            }
+        }
+    });
+
     // wait for workers to finish
-    println!("Waiting for workers to finish");
+    log(format!("Waiting for workers to finish"));
     workers
         .into_iter()
         .for_each(|worker| worker.join().unwrap());
 
     // send kill signal to watchdog (may not be directly necessary; the channel dropping should kill the watchdog automatically)
-    println!("Killing watchdog");
+    log(format!("Killing watchdog"));
     watchdog_notify.send(()).unwrap();
     watchdog.join().unwrap();
 
+    // send kill signal to monitor
+    log(format!("Killing monitor"));
+    monitor_notify.send(()).unwrap();
+    monitor.join().unwrap();
+
     // collect data
-    println!("Collecting data");
+    log(format!("Collecting data"));
     let board = corkboard.read().unwrap();
     let data = board
         .pieces
@@ -551,6 +718,6 @@ pub fn corkboard_download<T: PeerConnection>(
         .collect::<Vec<&u8>>();
 
     // this is really memory inefficient... need to figure out a better way to save and collect data
-    println!("Done");
+    log(format!("Done"));
     Ok(data.into_iter().copied().collect())
 }

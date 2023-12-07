@@ -22,13 +22,20 @@ impl BitTorrentError {
 
 impl Display for BitTorrentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "BitTorrent Error: {}", self.details)
+        write!(f, "BitTorrent Error: {}", self.details)
     }
 }
 
 impl From<anyhow::Error> for BitTorrentError {
     fn from(value: anyhow::Error) -> Self {
-        BitTorrentError::new(value.to_string())
+        BitTorrentError::new(
+            value
+                .chain()
+                .into_iter()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
+                .join(": "),
+        )
     }
 }
 

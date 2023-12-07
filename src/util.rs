@@ -76,3 +76,12 @@ pub fn querystring_encode(bytes: &[u8]) -> String {
         })
         .collect()
 }
+
+
+pub fn cap_length(msg: String, max_len: usize) -> String {
+    if msg.len() > max_len {
+        format!("{}...", &msg[..max_len - 3])
+    } else {
+        msg.to_string()
+    }
+}

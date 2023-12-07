@@ -11,14 +11,14 @@ pub enum PeerMessage {
     Interested,
     NotInterested,
     Have(u32),
-    Bitfield(BitFieldMessage),
+    Bitfield(BitfieldMessage),
     Request(RequestMessage),
     Piece(PieceMessage),
     Cancel(CancelMessage),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct BitFieldMessage {
+pub struct BitfieldMessage {
     pub bitfield: Vec<bool>,
 }
 
@@ -55,7 +55,7 @@ impl PeerMessage {
             Some(4u8) => Ok(Self::Have(u32::from_be_bytes(
                 bytes[1..5].try_into().unwrap(),
             ))),
-            Some(5u8) => Ok(Self::Bitfield(BitFieldMessage {
+            Some(5u8) => Ok(Self::Bitfield(BitfieldMessage {
                 bitfield: bytes[1..]
                     .iter()
                     .copied()
@@ -155,7 +155,7 @@ impl HandshakeMessage {
         [19u8]
             .iter()
             .chain(b"BitTorrent protocol".into_iter())
-            .chain((0..8).map(|_| &0u8))
+            .chain(&[0; 8])
             .chain(&self.info_hash)
             .chain(&self.peer_id)
             .copied()

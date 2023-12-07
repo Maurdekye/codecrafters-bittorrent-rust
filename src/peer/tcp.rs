@@ -10,7 +10,7 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     info_field,
-    util::{bytes_to_hex, read_n_bytes, sha1_hash},
+    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr},
 };
 
 use super::{
@@ -21,7 +21,7 @@ use super::{
 const CHUNK_SIZE: u32 = 16384;
 
 #[derive(Debug)]
-pub struct TcpPeerConnection {
+pub struct TcpPeer {
     #[allow(unused)]
     pub address: SocketAddrV4,
     pub meta_info: MetaInfo,
@@ -30,25 +30,30 @@ pub struct TcpPeerConnection {
     pub bitfield: Vec<bool>,
 }
 
-impl TcpPeerConnection {
+impl TcpPeer {
     /// Wait for a peer message to arrive from the peer and return it.
-    fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
-        // println!("reading {}", self.address);
+    pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
+        println!("[{}] <...< {}", timestr(), self.address);
         let buf = read_n_bytes(&mut self.stream, 4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
+        // println!("[{}] <.<.< {} {}b", timestr(), self.address, length);
         let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
         let response = PeerMessage::decode(&buf)?;
-        // println!("recv {} {:?}", self.address, &response);
+        println!(
+            "[{}] <<<<< {} {}",
+            timestr(), 
+            self.address,
+            cap_length(format!("{response:?}"), 100)
+        );
         Ok(response)
     }
 
     /// Send a peer message `message` to the peer.
-    fn send_peer_message(&mut self, message: &PeerMessage) -> Result<(), BitTorrentError> {
-        // println!("send {} {:?}", self.address, message);
+    pub fn send_peer_message(&mut self, message: &PeerMessage) -> Result<(), BitTorrentError> {
+        println!("[{}] >>>>> {} {:?}", timestr(), self.address, message);
         self.stream
             .write(&message.encode()?)
             .with_context(|| "Error sending peer message")?;
-        // println!("sent to {}", self.address);
         Ok(())
     }
 
@@ -62,7 +67,7 @@ impl TcpPeerConnection {
     }
 }
 
-impl PeerConnection for TcpPeerConnection {
+impl PeerConnection for TcpPeer {
     type Error = BitTorrentError;
 
     /// Create a new peer connection.
@@ -70,11 +75,10 @@ impl PeerConnection for TcpPeerConnection {
         peer: SocketAddrV4,
         meta_info: MetaInfo,
         peer_id: String,
-    ) -> Result<TcpPeerConnection, BitTorrentError> {
-        let mut connection = TcpPeerConnection {
+    ) -> Result<TcpPeer, BitTorrentError> {
+        let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect(peer)
-                .with_context(|| "Error connecting to peer")?,
+            stream: TcpStream::connect(peer).with_context(|| "Error connecting to peer")?,
             meta_info: meta_info,
             peer_id: peer_id,
             bitfield: vec![],
@@ -135,6 +139,7 @@ impl PeerConnection for TcpPeerConnection {
                         PeerMessage::Unchoke => {
                             choked = false;
                         }
+                        PeerMessage::Keepalive => {}
                         message => {
                             return Err(bterror!("Unexpected message from peer: {:?}", message))
                         }

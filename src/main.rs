@@ -15,7 +15,7 @@ use crate::{
     bencode::decode::consume_bencoded_value,
     download::{corkboard::corkboard_download, download_file},
     info::MetaInfo,
-    peer::tcp::TcpPeerConnection,
+    peer::tcp::TcpPeer,
     util::bytes_to_hex,
 };
 
@@ -228,7 +228,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Handshake(handshake_args) => {
             let meta_info = MetaInfo::from_file(&handshake_args.torrent_file)?;
-            let mut connection = TcpPeerConnection {
+            let mut connection = TcpPeer {
                 address: handshake_args.peer,
                 meta_info,
                 peer_id: handshake_args.peer_id,
@@ -241,7 +241,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DownloadPiece(download_piece_args) => {
             let meta_info = MetaInfo::from_file(&download_piece_args.torrent_file)?;
-            let data = download_piece_from_peer::<TcpPeerConnection>(
+            let data = download_piece_from_peer::<TcpPeer>(
                 &meta_info,
                 download_piece_args.piece_id as u32,
                 &download_piece_args.peer_id,
@@ -256,7 +256,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Download(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = download_file::<TcpPeerConnection>(
+            let full_file = download_file::<TcpPeer>(
                 &meta_info,
                 &download_args.peer_id,
                 download_args.port,
@@ -269,7 +269,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DownloadV2(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = corkboard_download::<TcpPeerConnection>(
+            let full_file = corkboard_download::<TcpPeer>(
                 meta_info.clone(),
                 &download_args.peer_id,
                 download_args.port,
