@@ -1,14 +1,14 @@
-use std::{
-    net::{Ipv4Addr, SocketAddrV4},
-    str::from_utf8,
-};
+use std::net::{Ipv4Addr, SocketAddrV4};
 
+use anyhow::Context;
 use serde::Deserialize;
 
 use crate::{
-    bterror, decode::Decoder, encode::encode_maybe_b64_string, error::BitTorrentError,
-    info::MetaInfo,
+    bterror, error::BitTorrentError,
+    info::MetaInfo, bencode::{encode::encode_maybe_b64_string, decode::consume_bencoded_value}, util::querystring_encode,
 };
+
+pub mod multimodal;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -45,20 +45,6 @@ impl SuccessfulTrackerResponse {
     }
 }
 
-/// Encode a byte slice as a URL-safe percent-escaped string.
-pub fn querystring_encode(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || [b'-', b'_', b'.', b'~'].contains(byte) {
-                from_utf8(&[*byte]).unwrap().to_string()
-            } else {
-                format!("%{:02x}", byte)
-            }
-        })
-        .collect()
-}
-
 /// Query the tracker for a list of peers for the torrent associated with the `meta_info` object passed.
 /// deprecated; use `multimodal_tracker::Tracker` instead 
 #[deprecated = "use `multimodal_tracker::Tracker` instead"]
@@ -89,14 +75,14 @@ pub fn query_tracker(
             .join("&")
         ))
         .send()
-        .map_err(|err| bterror!("Error making request to tracker url: {}", err))?
+        .with_context(|| "Error making request to tracker url")?
         .bytes()
-        .map_err(|err| bterror!("Error decoding request response: {}", err))?
+        .with_context(|| "Error decoding request response")?
         .to_vec();
 
     let tracker_response =
-        serde_json::from_value(Decoder::new().consume_bencoded_value(&mut &raw_body[..])?)
-            .map_err(|err| bterror!("Error deserializing tracker response: {}", err))?;
+        serde_json::from_value(consume_bencoded_value(&mut &raw_body[..])?)
+            .with_context(|| "Error deserializing tracker response")?;
 
     match tracker_response {
         TrackerResponse::Success(tracker_info) => Ok(tracker_info),

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use base64::{engine::general_purpose, Engine};
 use serde_json::Value;
 
@@ -8,7 +9,7 @@ pub fn encode_maybe_b64_string(string: &str) -> Result<Vec<u8>, BitTorrentError>
     Ok(if string.starts_with("base64:") {
         general_purpose::STANDARD_NO_PAD
             .decode(&string[7..])
-            .map_err(|err| bterror!("Error decoding base64 for string value: {}", err))?
+            .with_context(|| "Error decoding base64 for string value")?
     } else {
         string.bytes().collect()
     })

@@ -1,16 +1,18 @@
 use std::{net::UdpSocket, time::SystemTime};
 
+use anyhow::Context;
 use base64::{engine::general_purpose, Engine};
 
 use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{
+    bencode::decode::consume_bencoded_value,
     bterror,
-    decode::Decoder,
     error::BitTorrentError,
     info::MetaInfo,
-    tracker::{querystring_encode, SuccessfulTrackerResponse, TrackerResponse}, util::read_datagram,
+    tracker::{SuccessfulTrackerResponse, TrackerResponse},
+    util::{read_datagram, querystring_encode},
 };
 
 lazy_static! {
@@ -57,7 +59,10 @@ impl Tracker<'_> {
                         "{}?{}",
                         announce,
                         [
-                            ("info_hash", querystring_encode(&self.meta_info.info_hash()?)),
+                            (
+                                "info_hash",
+                                querystring_encode(&self.meta_info.info_hash()?)
+                            ),
                             ("peer_id", peer_id.to_string()),
                             ("port", format!("{}", port)),
                             ("uploaded", "0".to_string()),
@@ -71,15 +76,14 @@ impl Tracker<'_> {
                         .join("&")
                     ))
                     .send()
-                    .map_err(|err| bterror!("Error making request to tracker url: {}", err))?
+                    .with_context(|| "Error making request to tracker url")?
                     .bytes()
-                    .map_err(|err| bterror!("Error decoding request response: {}", err))?
+                    .with_context(|| "Error decoding request response")?
                     .to_vec();
 
-                let tracker_response = serde_json::from_value(
-                    Decoder::new().consume_bencoded_value(&mut &raw_body[..])?,
-                )
-                .map_err(|err| bterror!("Error deserializing tracker response: {}", err))?;
+                let tracker_response =
+                    serde_json::from_value(consume_bencoded_value(&mut &raw_body[..])?)
+                        .with_context(|| "Error deserializing tracker response")?;
 
                 match tracker_response {
                     TrackerResponse::Success(tracker_info) => Ok(tracker_info),
@@ -119,7 +123,7 @@ impl UdpTrackerConnection {
                 connection.connect(tracker_url)?;
                 Ok(connection)
             })
-            .map_err(|err| bterror!("Error connecting to tracker: {}", err))?;
+            .with_context(|| "Error connecting to tracker")?;
         Ok(UdpTrackerConnection {
             connection: connection,
             last_connection: None,
@@ -141,7 +145,7 @@ impl UdpTrackerConnection {
 
         self.connection
             .send(&request_bytes)
-            .map_err(|err| bterror!("Error sending connection request: {}", err))?;
+            .with_context(|| "Error sending connection request")?;
 
         // recieve connection request
         let response_bytes = read_datagram(&mut self.connection)?;
@@ -168,7 +172,9 @@ impl UdpTrackerConnection {
         let transaction_id: u32 = rand::random();
         let key: u32 = rand::random();
 
-        let connection_id = self.connection_id.ok_or(bterror!("No connection id to use"))?;
+        let connection_id = self
+            .connection_id
+            .ok_or(bterror!("No connection id to use"))?;
 
         // send announce request
         let request_bytes = []
@@ -190,7 +196,7 @@ impl UdpTrackerConnection {
 
         self.connection
             .send(&request_bytes)
-            .map_err(|err| bterror!("Error sending announce request: {}", err))?;
+            .with_context(|| "Error sending announce request")?;
 
         // recieve response
         let response_bytes = read_datagram(&mut self.connection)?;
@@ -206,8 +212,7 @@ impl UdpTrackerConnection {
 
         let peers = format!(
             "base64:{}",
-            general_purpose::STANDARD_NO_PAD
-                .encode(&response_bytes[20..])
+            general_purpose::STANDARD_NO_PAD.encode(&response_bytes[20..])
         );
 
         Ok(SuccessfulTrackerResponse { interval, peers })

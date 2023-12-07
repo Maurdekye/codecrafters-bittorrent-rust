@@ -9,15 +9,13 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use chrono::Utc;
-
 use crate::{
     bterror,
-    download::PeerConnection,
     error::BitTorrentError,
     info::MetaInfo,
-    multimodal_tracker::Tracker,
-    util::{sha1_hash, sleep},
+    peer::PeerConnection,
+    tracker::multimodal::Tracker,
+    util::{sha1_hash, sleep, timestr},
 };
 
 const MAX_PEER_USES: usize = 5;
@@ -116,9 +114,9 @@ struct Benchmark {
     duration_millis: usize,
 }
 
-enum PeerSearchResult {
+enum PeerSearchResult<T: PeerConnection> {
     ConnectNew(SocketAddrV4),
-    Reuse(PeerConnection),
+    Reuse(T),
     WaitThenRefetch(u64),
     PromptRefetch,
     Exit,
@@ -127,10 +125,6 @@ enum PeerSearchResult {
 enum LoopAction {
     Continue,
     Pass,
-}
-
-fn timestr() -> String {
-    Utc::now().format("%T.%f").to_string()
 }
 
 /// ## Corkboard Download
@@ -142,7 +136,7 @@ fn timestr() -> String {
 /// fetched. They check it once before performing their download to determine which peer to
 /// connect to and which piece to acquire, and once afterwards to validate and submit their
 /// successful download to the board.
-pub fn corkboard_download(
+pub fn corkboard_download<T: PeerConnection>(
     meta_info: MetaInfo,
     peer_id: &str,
     port: u16,
@@ -224,9 +218,11 @@ pub fn corkboard_download(
 
             // wait on watchdog alarm
             log(format!("Waiting {interval}s"));
-            match watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)) {
-                Err(RecvTimeoutError::Disconnected) | Ok(_) => break,
-                _ => (),
+            if matches!(
+                watchdog_alarm.recv_timeout(Duration::from_secs(interval as u64)),
+                Err(RecvTimeoutError::Disconnected) | Ok(_)
+            ) {
+                break;
             }
         }
         log(format!("Exiting"));
@@ -246,7 +242,7 @@ pub fn corkboard_download(
                     .map(|board| (board.meta_info.clone(), board.peer_id.clone()))
                     .unwrap();
 
-                let mut active_connection: Option<PeerConnection> = None;
+                let mut active_connection: Option<T> = None;
                 let mut uses = 0;
 
                 loop {
@@ -266,7 +262,7 @@ pub fn corkboard_download(
                                 }
 
                                 match active_connection
-                                    .map(|connection| (connection.address.clone(), connection))
+                                    .map(|connection| (connection.address().clone(), connection))
                                 {
                                     // review existing peer connection
                                     Some((address, connection)) => {
@@ -334,7 +330,7 @@ pub fn corkboard_download(
                                             // if no peer was found, wait a bit and try again
                                             None => {
                                                 log(format!("No peers found, waiting and retrying"));
-                                                PeerSearchResult::WaitThenRefetch(100)
+                                                PeerSearchResult::WaitThenRefetch(1000)
                                             },
                                         }
                                     }
@@ -348,15 +344,11 @@ pub fn corkboard_download(
                     let mut connection = match peer_search_result {
                         PeerSearchResult::ConnectNew(address) => {
                             // try to connect to the new peer
-                            let connection_result = PeerConnection::new(
+                            let connection_result = T::new(
                                 address.clone(),
                                 meta_info.clone(),
                                 peer_id.to_string(),
-                            )
-                            .and_then(|mut connection| {
-                                connection.initialize()?;
-                                Ok(connection)
-                            });
+                            );
 
                             match connection_result {
 
@@ -411,9 +403,9 @@ pub fn corkboard_download(
                                     .pieces
                                     .iter()
                                     .enumerate()
-                                    .zip(connection.bitfield.clone().into_iter())
+                                    .zip(connection.bitfield().iter())
                                     .find(|((_, piece), has_piece)| {
-                                        piece.state == PieceState::Unfetched && *has_piece
+                                        piece.state == PieceState::Unfetched && **has_piece
                                     })
                                     .map(|((piece_id, _), _)| piece_id);
                                 match next_piece {
@@ -428,10 +420,10 @@ pub fn corkboard_download(
 
                                     // if no piece was found, mark peer as superceded and try again
                                     None => {
-                                        log(format!("No pieces available, dropping peer {}", connection.address));
+                                        log(format!("No pieces available, dropping peer {}", connection.address()));
                                         board
                                             .peers
-                                            .entry(connection.address.clone())
+                                            .entry(connection.address().clone())
                                             .and_modify(|peer| peer.state = PeerState::Superceded);
                                     }
                                 };
@@ -446,7 +438,7 @@ pub fn corkboard_download(
                         None => continue,
                     };
 
-                    log(format!("Downloading piece {piece_id} from {}", connection.address));
+                    log(format!("Downloading piece {piece_id} from {}", connection.address()));
                     // download piece, recording download time
                     let start_time = SystemTime::now();
                     let result = connection.download_piece(piece_id as u32);
@@ -463,12 +455,12 @@ pub fn corkboard_download(
 
                                 // download failed
                                 Err(err) => {
-                                    log(format!("Failed to download piece {piece_id} from {}: {err}", connection.address));
+                                    log(format!("Failed to download piece {piece_id} from {}: {err}", connection.address()));
 
                                     // mark peer as errored
                                     board
                                         .peers
-                                        .entry(connection.address.clone())
+                                        .entry(connection.address().clone())
                                         .and_modify(|peer| peer.state = PeerState::Error);
 
                                     // mark piece as unfetched
@@ -482,17 +474,17 @@ pub fn corkboard_download(
 
                                 // download succeeded
                                 Ok(data) => {
-                                    log(format!("Finished downloading piece {piece_id} from {}", connection.address));
+                                    log(format!("Finished downloading piece {piece_id} from {}", connection.address()));
 
                                     // update peer performance
-                                    board.peers.entry(connection.address.clone()).and_modify(
+                                    board.peers.entry(connection.address().clone()).and_modify(
                                         |peer| {
                                             peer.benchmarks.push(Benchmark {
                                                 bytes: data.len(),
                                                 duration_millis: duration,
                                             });
                                             let performance = peer.update_performance();
-                                            log(format!("{} has a performance of {:.4} MB/s", connection.address, performance / MB_S ));
+                                            log(format!("{} has a performance of {:.4} MB/s", connection.address(), performance / MB_S ));
                                         },
                                     );
 

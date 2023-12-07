@@ -1,12 +1,10 @@
 use std::{fs, path::PathBuf};
 
 use crate::{
-    bterror,
-    decode::Decoder,
-    encode::{bencode_value, encode_maybe_b64_string},
     error::BitTorrentError,
-    util::sha1_hash,
+    util::sha1_hash, bencode::{decode::consume_bencoded_value, encode::{bencode_value, encode_maybe_b64_string}},
 };
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{from_value, to_value};
 
@@ -62,11 +60,11 @@ macro_rules! info_field {
 impl MetaInfo {
     /// Read the metainfo file into a `MetaInfo` result.
     pub fn from_file(filename: &str) -> Result<Self, BitTorrentError> {
-        let content = fs::read(filename).map_err(|err| bterror!("Error reading file: {}", err))?;
-        let decoded_value = Decoder::new().consume_bencoded_value(&mut &content[..])?;
+        let content = fs::read(filename).with_context(|| "Error reading file")?;
+        let decoded_value = consume_bencoded_value(&mut &content[..])?;
         // dbg!(&decoded_value);
         let meta_info = from_value(decoded_value)
-            .map_err(|err| bterror!("Unable to parse meta info dictionary: {}", err))?;
+            .with_context(|| "Unable to parse meta info dictionary")?;
         Ok(meta_info)
     }
 
@@ -76,7 +74,7 @@ impl MetaInfo {
             Info::SingleFile(single_file) => to_value(single_file),
             Info::MultiFile(multi_file) => to_value(multi_file),
         }
-        .map_err(|err| bterror!("Unable to bencode info dict: {}", err))?;
+        .with_context(|| "Unable to bencode info dict")?;
         let bencoded = bencode_value(as_object)?;
         Ok(sha1_hash(&bencoded))
     }

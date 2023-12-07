@@ -1,7 +1,9 @@
+use anyhow::Context;
+use chrono::Utc;
 use sha1::{Digest, Sha1};
-use std::{io::Read, net::UdpSocket};
+use std::{io::Read, net::UdpSocket, str::from_utf8};
 
-use crate::{bterror, error::BitTorrentError};
+use crate::error::BitTorrentError;
 
 /// Convert a hex string to a byte array.
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -15,7 +17,7 @@ pub fn read_n_bytes<T: Read>(stream: &mut T, mut n: usize) -> Result<Vec<u8>, Bi
         let mut buf = vec![0u8; n];
         let num_read = stream
             .read(&mut buf)
-            .map_err(|err| bterror!("Error reading tcp stream: {}", err))?;
+            .with_context(|| "Error reading tcp stream")?;
         bytes.extend(&buf[..num_read]);
         n -= num_read;
     }
@@ -26,7 +28,7 @@ pub fn read_datagram(stream: &mut UdpSocket) -> Result<Vec<u8>, BitTorrentError>
     let mut buf = [0u8; 65536];
     let num_read = stream
         .recv(&mut buf)
-        .map_err(|err| bterror!("Error reading udp datagram: {}", err))?;
+        .with_context(|| "Error reading udp datagram")?;
     Ok(buf[..num_read].to_vec())
 }
 
@@ -55,4 +57,22 @@ pub fn sha1_hash(bytes: &[u8]) -> [u8; 20] {
 
 pub fn sleep(millis: u64) {
     std::thread::sleep(std::time::Duration::from_millis(millis))
+}
+
+pub fn timestr() -> String {
+    Utc::now().format("%T.%f").to_string()
+}
+
+/// Encode a byte slice as a URL-safe percent-escaped string.
+pub fn querystring_encode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || [b'-', b'_', b'.', b'~'].contains(byte) {
+                from_utf8(&[*byte]).unwrap().to_string()
+            } else {
+                format!("%{:02x}", byte)
+            }
+        })
+        .collect()
 }

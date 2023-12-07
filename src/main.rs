@@ -4,26 +4,26 @@ use std::{
     path::PathBuf,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use download::download_piece_from_peer;
 use error::BitTorrentError;
-use handshake::{send_handshake, HandshakeMessage};
-use multimodal_tracker::Tracker;
 use regex::Regex;
+use tracker::multimodal::Tracker;
 
 use crate::{
-    corkboard::corkboard_download, decode::Decoder, download::download_file, info::MetaInfo,
+    bencode::decode::consume_bencoded_value,
+    download::{corkboard::corkboard_download, download_file},
+    info::MetaInfo,
+    peer::tcp::TcpPeerConnection,
     util::bytes_to_hex,
 };
 
-mod corkboard;
-mod decode;
+mod bencode;
 mod download;
-mod encode;
 mod error;
-mod handshake;
 mod info;
-mod multimodal_tracker;
+mod peer;
 mod tracker;
 mod util;
 
@@ -200,7 +200,7 @@ fn main() -> Result<(), BitTorrentError> {
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
             let mut content = decode_args.raw_content.as_bytes();
-            let decoded = Decoder::new().consume_bencoded_value(&mut content)?;
+            let decoded = consume_bencoded_value(&mut content)?;
             println!("{}", decoded);
         }
         Subcommand::Info(info_args) => {
@@ -228,22 +228,27 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Handshake(handshake_args) => {
             let meta_info = MetaInfo::from_file(&handshake_args.torrent_file)?;
-            let message = HandshakeMessage::new(&meta_info, &handshake_args.peer_id)?;
-            let mut stream = TcpStream::connect(&handshake_args.peer)
-                .map_err(|err| bterror!("Error connecting to peer: {}", err))?;
-            let response = send_handshake(&mut stream, &message)?;
+            let mut connection = TcpPeerConnection {
+                address: handshake_args.peer,
+                meta_info,
+                peer_id: handshake_args.peer_id,
+                stream: TcpStream::connect(&handshake_args.peer)
+                    .with_context(|| "Error connecting to peer")?,
+                bitfield: Vec::new(),
+            };
+            let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
         }
         Subcommand::DownloadPiece(download_piece_args) => {
             let meta_info = MetaInfo::from_file(&download_piece_args.torrent_file)?;
-            let data = download_piece_from_peer(
+            let data = download_piece_from_peer::<TcpPeerConnection>(
                 &meta_info,
                 download_piece_args.piece_id as u32,
                 &download_piece_args.peer_id,
                 download_piece_args.port,
             )?;
             fs::write(&download_piece_args.output, data)
-                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
+                .with_context(|| "Error writing to disk")?;
             println!(
                 "Piece {} downloaded to {}.",
                 download_piece_args.piece_id, &download_piece_args.output
@@ -251,9 +256,12 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Download(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = download_file(&meta_info, &download_args.peer_id, download_args.port)?;
-            fs::write(&download_args.output, full_file)
-                .map_err(|err| bterror!("Error writing to disk: {}", err))?;
+            let full_file = download_file::<TcpPeerConnection>(
+                &meta_info,
+                &download_args.peer_id,
+                download_args.port,
+            )?;
+            fs::write(&download_args.output, full_file).with_context(|| "Error writing to disk")?;
             println!(
                 "Downloaded {} to {}.",
                 download_args.torrent_file, &download_args.output
@@ -261,7 +269,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DownloadV2(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = corkboard_download(
+            let full_file = corkboard_download::<TcpPeerConnection>(
                 meta_info.clone(),
                 &download_args.peer_id,
                 download_args.port,
@@ -269,8 +277,12 @@ fn main() -> Result<(), BitTorrentError> {
             )?;
             meta_info
                 .save_to_path(&download_args.output, full_file)
-                .map_err(|err| bterror!("Error saving torrent file(s): {}", err))?;
-            println!("Downloaded {} to {}.", download_args.torrent_file, &download_args.output.to_str().unwrap());
+                .with_context(|| "Error saving torrent file(s)")?;
+            println!(
+                "Downloaded {} to {}.",
+                download_args.torrent_file,
+                &download_args.output.to_str().unwrap()
+            );
         }
     }
     Ok(())
