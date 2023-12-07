@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::Display;
 
+
 #[macro_export]
 macro_rules! bterror {
     ($($arg:tt)*) => {
@@ -36,6 +37,12 @@ impl From<anyhow::Error> for BitTorrentError {
                 .collect::<Vec<_>>()
                 .join(": "),
         )
+    }
+}
+
+impl From<std::io::Error> for BitTorrentError {
+    fn from(value: std::io::Error) -> Self {
+        BitTorrentError::new(value.to_string())
     }
 }
 

@@ -1,17 +1,18 @@
 use std::{
     io::Write,
-    net::{TcpStream, SocketAddr},
+    net::{SocketAddr, TcpStream},
+    sync::{Arc, Condvar, Mutex},
+    thread,
 };
 
 use anyhow::Context;
-
 
 use crate::{
     bterror,
     error::BitTorrentError,
     info::MetaInfo,
     info_field,
-    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr},
+    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr, sleep},
 };
 
 use super::{
@@ -42,7 +43,7 @@ impl TcpPeer {
         let response = PeerMessage::decode(&buf)?;
         println!(
             "[{}] <<<<< {} {}",
-            timestr(), 
+            timestr(),
             self.address,
             cap_length(format!("{response:?}"), 100)
         );
@@ -66,6 +67,16 @@ impl TcpPeer {
         let buf = read_n_bytes(&mut self.stream, 68)?;
         HandshakeMessage::decode(&buf)
     }
+
+    pub fn try_clone(&self) -> Result<Self, BitTorrentError> {
+        Ok(TcpPeer {
+            address: self.address,
+            meta_info: self.meta_info.clone(),
+            peer_id: self.peer_id.clone(),
+            stream: self.stream.try_clone()?,
+            bitfield: self.bitfield.clone(),
+        })
+    }
 }
 
 impl PeerConnection for TcpPeer {
@@ -79,7 +90,8 @@ impl PeerConnection for TcpPeer {
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(5)).with_context(|| "Error connecting to peer")?,
+            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(5))
+                .with_context(|| "Error connecting to peer")?,
             meta_info: meta_info,
             peer_id: peer_id,
             bitfield: vec![],
@@ -107,54 +119,74 @@ impl PeerConnection for TcpPeer {
 
     /// Download a piece of the file, with `piece_id` corresponding to the piece to download.
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, BitTorrentError> {
-        let chunk_offset = piece_id * *info_field!(&self.meta_info.info, piece_length) as u32;
-        let chunk_size = (self.meta_info.length() as u32 - chunk_offset)
+        let piece_offset = piece_id * *info_field!(&self.meta_info.info, piece_length) as u32;
+        let chunk_size = (self.meta_info.length() as u32 - piece_offset)
             .min(*info_field!(&self.meta_info.info, piece_length) as u32);
 
-        // send requests
-        let mut responses = (0..chunk_size)
-            .step_by(CHUNK_SIZE as usize)
-            .collect::<Vec<_>>()
-            .chunks(1)
-            .map(|chunk_offsets| {
-                for chunk_offset in chunk_offsets.iter() {
-                    let message_length = (chunk_size - chunk_offset).min(CHUNK_SIZE);
-                    self.send_peer_message(&PeerMessage::Request(RequestMessage {
-                        index: piece_id,
-                        begin: *chunk_offset,
-                        length: message_length,
-                    }))?;
+        let chunks = (0..chunk_size).step_by(CHUNK_SIZE as usize);
+        let chunks_len = chunks.len();
+
+        let choked = Arc::new((Mutex::new(true), Condvar::new()));
+
+        // start requestor thread
+        let requester_choked = choked.clone();
+        let mut requester_connection = self.try_clone()?;
+        thread::spawn(move || {
+            let (unchoked, choked_cvar) = &*requester_choked;
+
+            for chunk in chunks {
+                let mut unchoked = unchoked.lock().unwrap();
+                while !*unchoked {
+                    unchoked = choked_cvar.wait(unchoked).unwrap();
                 }
 
-                let mut choked = false;
-                let mut pieces = Vec::new();
+                let message_length = (chunk_size - chunk).min(CHUNK_SIZE);
+                requester_connection.send_peer_message(&PeerMessage::Request(RequestMessage {
+                    index: piece_id,
+                    begin: piece_offset + chunk,
+                    length: message_length,
+                }))?;
 
-                loop {
-                    match self.await_peer_message()? {
-                        PeerMessage::Piece(piece) => {
-                            pieces.push(piece);
-                        }
-                        PeerMessage::Choke => {
-                            choked = true;
-                        }
-                        PeerMessage::Unchoke => {
-                            choked = false;
-                        }
-                        PeerMessage::Keepalive => {}
-                        message => {
-                            return Err(bterror!("Unexpected message from peer: {:?}", message))
-                        }
+                sleep(50);
+            }
+
+            Ok::<(), BitTorrentError>(())
+        });
+
+        // start reciever thread
+        let reciever_choked = choked.clone();
+        let mut reciever_connection = self.try_clone()?;
+        let reciever = thread::spawn(move || {
+            let (unchoked, choked_cvar) = &*reciever_choked;
+
+            let mut pieces = Vec::new();
+
+            loop {
+                match reciever_connection.await_peer_message()? {
+                    PeerMessage::Piece(piece) => {
+                        pieces.push(piece);
                     }
-                    if !choked && pieces.len() == chunk_offsets.len() {
-                        break;
+                    PeerMessage::Choke => {
+                        let mut unchoked = unchoked.lock().unwrap();
+                        *unchoked = false;
+                        choked_cvar.notify_one();
                     }
+                    PeerMessage::Unchoke => {
+                        let mut unchoked = unchoked.lock().unwrap();
+                        *unchoked = true;
+                        choked_cvar.notify_one();
+                    }
+                    _ => {}
                 }
-                Ok(pieces)
-            })
-            .collect::<Result<Vec<Vec<PieceMessage>>, BitTorrentError>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+                if pieces.len() == chunks_len {
+                    break;
+                }
+            }
+
+            Ok::<Vec<PieceMessage>, BitTorrentError>(pieces)
+        });
+
+        let mut responses = reciever.join().unwrap()?;
 
         // coallate chunks
         responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
