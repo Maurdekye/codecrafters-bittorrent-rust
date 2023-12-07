@@ -1,9 +1,10 @@
 use std::{
     io::Write,
-    net::{SocketAddrV4, TcpStream},
+    net::{TcpStream, SocketAddr},
 };
 
 use anyhow::Context;
+
 
 use crate::{
     bterror,
@@ -23,7 +24,7 @@ const CHUNK_SIZE: u32 = 16384;
 #[derive(Debug)]
 pub struct TcpPeer {
     #[allow(unused)]
-    pub address: SocketAddrV4,
+    pub address: SocketAddr,
     pub meta_info: MetaInfo,
     pub peer_id: String,
     pub stream: TcpStream,
@@ -72,13 +73,13 @@ impl PeerConnection for TcpPeer {
 
     /// Create a new peer connection.
     fn new(
-        peer: SocketAddrV4,
+        peer: SocketAddr,
         meta_info: MetaInfo,
         peer_id: String,
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect(peer).with_context(|| "Error connecting to peer")?,
+            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(5)).with_context(|| "Error connecting to peer")?,
             meta_info: meta_info,
             peer_id: peer_id,
             bitfield: vec![],
@@ -176,7 +177,7 @@ impl PeerConnection for TcpPeer {
         }
     }
 
-    fn address(&self) -> &SocketAddrV4 {
+    fn address(&self) -> &SocketAddr {
         &self.address
     }
 

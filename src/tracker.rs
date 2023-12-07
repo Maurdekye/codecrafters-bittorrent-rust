@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddrV4, SocketAddr};
 
 use anyhow::Context;
 use serde::Deserialize;
@@ -31,15 +31,15 @@ pub struct FailureTrackerResponse {
 
 impl SuccessfulTrackerResponse {
     /// Return the peers as a vector of socket addresses.
-    pub fn peers(&self) -> Result<Vec<SocketAddrV4>, BitTorrentError> {
+    pub fn peers(&self) -> Result<Vec<SocketAddr>, BitTorrentError> {
         Ok(encode_maybe_b64_string(&self.peers)?
             .to_vec()
             .chunks(6)
             .map(|chunk| {
-                SocketAddrV4::new(
+                SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
                     u16::from_be_bytes([chunk[4], chunk[5]]),
-                )
+                ))
             })
             .collect())
     }

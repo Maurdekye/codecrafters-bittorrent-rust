@@ -1,4 +1,4 @@
-use std::net::{SocketAddrV4, UdpSocket};
+use std::net::{UdpSocket, SocketAddr};
 
 use anyhow::Context;
 
@@ -6,6 +6,7 @@ use crate::{error::BitTorrentError, info::MetaInfo};
 
 use super::PeerConnection;
 
+#[allow(unused)]
 pub enum UtpMessage {
     Data,
     Fin,
@@ -14,6 +15,7 @@ pub enum UtpMessage {
     Syn,
 }
 
+#[allow(unused)]
 impl UtpMessage {
     fn encode(&self) -> Vec<u8> {
         todo!()
@@ -22,7 +24,7 @@ impl UtpMessage {
 
 #[derive(Debug)]
 pub struct UtpPeer {
-    pub address: SocketAddrV4,
+    pub address: SocketAddr,
     pub meta_info: MetaInfo,
     pub peer_id: String,
     pub socket: UdpSocket,
@@ -39,11 +41,11 @@ impl UtpPeer {
 impl PeerConnection for UtpPeer {
     type Error = BitTorrentError;
 
-    fn new(peer: SocketAddrV4, meta_info: MetaInfo, peer_id: String) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
-        let mut connection = UtpPeer {
+        let connection = UtpPeer {
             socket: UdpSocket::bind("0.0.0.0:0")
                 .with_context(|| "Unable to bind to local socket")?,
             bitfield: Vec::new(),
@@ -63,11 +65,12 @@ impl PeerConnection for UtpPeer {
         Ok(connection)
     }
 
+    #[allow(unused)]
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, Self::Error> {
         todo!()
     }
 
-    fn address(&self) -> &SocketAddrV4 {
+    fn address(&self) -> &SocketAddr {
         &self.address
     }
 

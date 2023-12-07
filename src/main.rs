@@ -1,6 +1,6 @@
 use std::{
     fs,
-    net::{Ipv4Addr, SocketAddrV4, TcpStream},
+    net::{Ipv4Addr, SocketAddrV4, TcpStream, SocketAddr},
     path::PathBuf,
 };
 
@@ -229,7 +229,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Handshake(handshake_args) => {
             let meta_info = MetaInfo::from_file(&handshake_args.torrent_file)?;
             let mut connection = TcpPeer {
-                address: handshake_args.peer,
+                address: SocketAddr::V4(handshake_args.peer),
                 meta_info,
                 peer_id: handshake_args.peer_id,
                 stream: TcpStream::connect(&handshake_args.peer)

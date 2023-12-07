@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
-    net::{SocketAddrV4, TcpListener, SocketAddr},
+    net::{TcpListener, SocketAddr},
     sync::{
         mpsc::{channel, RecvTimeoutError},
         Arc, RwLock,
     },
     thread::{self},
-    time::{Duration, SystemTime}, fmt::format, io::Write,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
@@ -33,7 +33,7 @@ struct Corkboard {
     peer_id: String,
     port: u16,
     pieces: Vec<Piece>,
-    peers: HashMap<SocketAddrV4, Peer>,
+    peers: HashMap<SocketAddr, Peer>,
 }
 
 impl Corkboard {
@@ -120,7 +120,7 @@ struct Benchmark {
 }
 
 enum PeerSearchResult<T: PeerConnection> {
-    ConnectNew(SocketAddrV4),
+    ConnectNew(SocketAddr),
     Reuse(T),
     WaitThenRefetch(u64),
     PromptRefetch,
@@ -615,10 +615,7 @@ pub fn corkboard_download<T: PeerConnection>(
                         // set up connection
                         let mut connection = TcpPeer {
                             stream,
-                            address: match address {
-                                SocketAddr::V4(addr) => addr,
-                                _ => return Err::<(), BitTorrentError>(bterror!("Ipv6 not supported"))
-                            },
+                            address,
                             meta_info,
                             peer_id,
                             bitfield: Vec::new(),
@@ -646,7 +643,7 @@ pub fn corkboard_download<T: PeerConnection>(
                         loop {
                             match connection.await_peer_message()? {
                                 PeerMessage::Interested => break,
-                                PeerMessage::NotInterested => return Err(bterror!("{} was not interested", address)),
+                                PeerMessage::NotInterested => return Err::<(), BitTorrentError>(bterror!("{} was not interested", address)),
                                 _ => {}
                             }
                         }

@@ -1,24 +1,20 @@
-use std::{fmt::Display, net::SocketAddrV4};
+use std::{fmt::Display, net::SocketAddr};
 
 use crate::info::MetaInfo;
 
+pub mod message;
 pub mod tcp;
 pub mod utp;
-pub mod message; 
 
 pub trait PeerConnection {
     type Error: Display;
 
-    fn new(
-        peer: SocketAddrV4,
-        meta_info: MetaInfo,
-        peer_id: String,
-    ) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String) -> Result<Self, Self::Error>
     where
         Self: Sized;
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, Self::Error>;
 
-    fn address(&self) -> &SocketAddrV4;
+    fn address(&self) -> &SocketAddr;
     fn meta_info(&self) -> &MetaInfo;
     fn bitfield(&self) -> &Vec<bool>;
 
