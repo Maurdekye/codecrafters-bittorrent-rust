@@ -1,4 +1,4 @@
-use std::{fmt::Display, net::SocketAddr};
+use std::{net::SocketAddr, error};
 
 use crate::info::MetaInfo;
 
@@ -7,7 +7,7 @@ pub mod tcp;
 pub mod utp;
 
 pub trait PeerConnection {
-    type Error: Display;
+    type Error: error::Error;
 
     fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String) -> Result<Self, Self::Error>
     where
