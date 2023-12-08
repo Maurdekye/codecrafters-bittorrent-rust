@@ -189,20 +189,22 @@ pub fn corkboard_download<T: PeerConnection>(
     let data = corkboard
         .read()
         .map(|board| {
-            board
-                .pieces
-                .iter()
-                .map(|piece| match &piece.state {
-                    PieceState::Fetched(data) => Ok(data),
-                    _ => Err(bterror!("Unfetched piece data remains!")),
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .into_iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<u8>>()
+            Ok::<_, BitTorrentError>(
+                board
+                    .pieces
+                    .iter()
+                    .map(|piece| match &piece.state {
+                        PieceState::Fetched(data) => Ok(data),
+                        _ => Err(bterror!("Unfetched piece data remains!")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<u8>>(),
+            )
         })
-        .unwrap();
+        .unwrap()?;
 
     log(format!("Done"));
 
