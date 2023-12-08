@@ -174,31 +174,35 @@ pub fn corkboard_download<T: PeerConnection>(
 
     // send kill signals to subtasks
     log(format!("Killing watchdog, monitor, & seeder"));
-    
+
     watchdog_notify.send(()).unwrap();
     monitor_notify.send(()).unwrap();
     seeder_notify.send(()).unwrap();
 
-    monitor.join().unwrap()?;
     watchdog.join().unwrap()?;
+    monitor.join().unwrap()?;
     seeder.join().unwrap()?;
 
     // coallate data
     // this is really memory inefficient... need to figure out a better way to save and collect data
     log(format!("Coallating data"));
-    let board = corkboard.read().unwrap();
-    let data = board
-        .pieces
-        .iter()
-        .map(|piece| match &piece.state {
-            PieceState::Fetched(data) => Ok(data),
-            _ => Err(bterror!("Unfetched piece data remains!")),
+    let data = corkboard
+        .read()
+        .map(|board| {
+            board
+                .pieces
+                .iter()
+                .map(|piece| match &piece.state {
+                    PieceState::Fetched(data) => Ok(data),
+                    _ => Err(bterror!("Unfetched piece data remains!")),
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<u8>>()
         })
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<u8>>();
+        .unwrap();
 
     log(format!("Done"));
 
