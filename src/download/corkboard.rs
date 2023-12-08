@@ -5,12 +5,10 @@ use std::{
         mpsc::{channel, Receiver},
         Arc, RwLock,
     },
-    thread::{self, JoinHandle},
+    thread::{self},
 };
 
 use crate::{bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection, util::timestr};
-
-use self::watchdog::watchdog;
 
 mod monitor;
 mod seeder;
@@ -153,9 +151,9 @@ pub fn corkboard_download<T: PeerConnection>(
     // start subtasks
     log(format!("Starting subtasks"));
     let tasks = [
-        start_task(|board, alarm| monitor::monitor(board, alarm)),
-        start_task(|board, alarm| watchdog::watchdog(board, alarm)),
-        start_task(|board, alarm| seeder::seeder(board, alarm)),
+        start_task(monitor::monitor),
+        start_task(watchdog::watchdog),
+        start_task(seeder::seeder),
     ];
 
     // start workers
