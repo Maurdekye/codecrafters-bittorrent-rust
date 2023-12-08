@@ -23,6 +23,7 @@ mod bencode;
 mod download;
 mod error;
 mod info;
+mod multithread;
 mod peer;
 mod tracker;
 mod util;

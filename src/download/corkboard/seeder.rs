@@ -31,11 +31,13 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
 
     log(format!("Seeder init"));
 
-    let listener = corkboard
-        .read()
-        .map(|board| TcpListener::bind(format!("0.0.0.0:{}", board.port)).unwrap())
-        .unwrap();
+    // let listener = corkboard
+    //     .read()
+    //     .map(|board| TcpListener::bind(format!("0.0.0.0:{}", board.port)).unwrap())
+    //     .unwrap();
+    let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     listener.set_nonblocking(true)?;
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {

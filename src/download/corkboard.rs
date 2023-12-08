@@ -1,11 +1,16 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{mpsc::channel, Arc, RwLock},
-    thread::{self},
+    sync::{
+        mpsc::{channel, Receiver},
+        Arc, RwLock,
+    },
+    thread::{self, JoinHandle},
 };
 
 use crate::{bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection, util::timestr};
+
+use self::watchdog::watchdog;
 
 mod monitor;
 mod seeder;
@@ -137,30 +142,28 @@ pub fn corkboard_download<T: PeerConnection>(
 
     // Spawn subtasks
 
-    // start monitor
-    log(format!("Starting monitor"));
-    let monitor_corkboard = corkboard.clone();
-    let (monitor_notify, monitor_alarm) = channel();
-    let monitor = thread::spawn(move || monitor::monitor(monitor_corkboard, monitor_alarm));
+    let start_task =
+        |task: fn(Arc<RwLock<Corkboard>>, Receiver<()>) -> Result<(), BitTorrentError>| {
+            let corkboard = corkboard.clone();
+            let (notify, alarm) = channel();
+            let handle = thread::spawn(move || task(corkboard, alarm));
+            (handle, notify)
+        };
 
-    // start watchdog
-    log(format!("Starting watchdog"));
-    let watchdog_corkboard = corkboard.clone();
-    let (watchdog_notify, watchdog_alarm) = channel();
-    let watchdog = thread::spawn(move || watchdog::watchdog(watchdog_corkboard, watchdog_alarm));
-
-    // start seeder
-    log(format!("Starting seeder"));
-    let seeder_corkboard = corkboard.clone();
-    let (seeder_notify, seeder_alarm) = channel();
-    let seeder = thread::spawn(move || seeder::seeder(seeder_corkboard, seeder_alarm));
+    // start subtasks
+    log(format!("Starting subtasks"));
+    let tasks = [
+        start_task(|board, alarm| monitor::monitor(board, alarm)),
+        start_task(|board, alarm| watchdog::watchdog(board, alarm)),
+        start_task(|board, alarm| seeder::seeder(board, alarm)),
+    ];
 
     // start workers
-    println!("Starting workers");
+    log(format!("Starting workers"));
     let workers = (0..workers)
         .map(|worker_id| {
-            let worker_corkboard = corkboard.clone();
-            thread::spawn(move || worker::worker::<T>(worker_corkboard, worker_id))
+            let corkboard = corkboard.clone();
+            thread::spawn(move || worker::worker::<T>(corkboard, worker_id))
         })
         .collect::<Vec<_>>();
 
@@ -173,15 +176,14 @@ pub fn corkboard_download<T: PeerConnection>(
     }
 
     // send kill signals to subtasks
-    log(format!("Killing watchdog, monitor, & seeder"));
-
-    watchdog_notify.send(()).unwrap();
-    monitor_notify.send(()).unwrap();
-    seeder_notify.send(()).unwrap();
-
-    watchdog.join().unwrap()?;
-    monitor.join().unwrap()?;
-    seeder.join().unwrap()?;
+    log(format!("Killing subtasks"));
+    let (handles, alarms): (Vec<_>, Vec<_>) = tasks.into_iter().unzip();
+    for alarm in alarms {
+        alarm.send(()).unwrap();
+    }
+    for handle in handles {
+        handle.join().unwrap()?;
+    }
 
     // coallate data
     // this is really memory inefficient... need to figure out a better way to save and collect data
