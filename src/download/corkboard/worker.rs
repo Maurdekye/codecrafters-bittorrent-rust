@@ -97,13 +97,23 @@ where
                         })
                         .collect::<Vec<_>>();
 
-                    // sort by connection speed
+                    // sort by connection speed and connection attempts
                     potential_peers.sort_by(|(_, peer_a), (_, peer_b)| {
-                        peer_b
-                            .performance
-                            .unwrap_or(f64::MAX)
-                            .partial_cmp(&peer_a.performance.unwrap_or(f64::MAX))
-                            .unwrap_or(std::cmp::Ordering::Equal)
+                        match (peer_a.performance, peer_b.performance) {
+                            // If both have performance data, compare based on performance
+                            (Some(perf_a), Some(perf_b)) => perf_b
+                                .partial_cmp(&perf_a)
+                                .unwrap_or(std::cmp::Ordering::Equal),
+
+                            // If neither have performance data, compare based on connection attempts
+                            (None, None) => {
+                                peer_a.connection_attempts.cmp(&peer_b.connection_attempts)
+                            }
+
+                            // If only one has performance data, that one is prioritized
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                        }
                     });
 
                     let potential_peer =
@@ -113,13 +123,10 @@ where
                         // if a peer was found, mark it as connecting
                         Some(address) => {
                             log(format!("Found peer {address}, attempting to connect"));
-                            board
-                                .peers
-                                .entry(address)
-                                .and_modify(|peer| {
-                                    peer.connection_attempts += 1;
-                                    peer.state = PeerState::Connecting;
-                                });
+                            board.peers.entry(address).and_modify(|peer| {
+                                peer.connection_attempts += 1;
+                                peer.state = PeerState::Connecting;
+                            });
                             PeerSearchResult::ConnectNew(address)
                         }
 
@@ -305,8 +312,12 @@ where
         let mut connection = match peer_search_result {
             PeerSearchResult::ConnectNew(address) => {
                 // try to connect to the new peer
-                let connection_result =
-                    T::new(address.clone(), meta_info.clone(), peer_id.to_string(), port);
+                let connection_result = T::new(
+                    address.clone(),
+                    meta_info.clone(),
+                    peer_id.to_string(),
+                    port,
+                );
 
                 match connection_result {
                     // if successful, mark peer as active & claimed
@@ -330,18 +341,20 @@ where
                         corkboard
                             .write()
                             .map(|mut board| {
-                                board
-                                    .peers
-                                    .entry(address.clone())
-                                    .and_modify(|peer| 
-                                        if peer.connection_attempts < MAX_RECONNECT_ATTEMPTS {
-                                            log(format!("Connection attempt {} to {address} failed: {err}", peer.connection_attempts));
-                                            peer.state = PeerState::Active(false);
-                                        } else {
-                                            log(format!("Connection attempt {} to {address} failed, marking as errored: {err}", peer.connection_attempts));
-                                            peer.state = PeerState::Error;
-                                        }
-                                    );
+                                board.peers.entry(address.clone()).and_modify(|peer| {
+                                    // if peer.connection_attempts < MAX_RECONNECT_ATTEMPTS {
+                                    //     log(format!("Connection attempt {} to {address} failed: {err}", peer.connection_attempts));
+                                    //     peer.state = PeerState::Active(false);
+                                    // } else {
+                                    //     log(format!("Connection attempt {} to {address} failed, marking as errored: {err}", peer.connection_attempts));
+                                    //     peer.state = PeerState::Error;
+                                    // }
+                                    peer.state = PeerState::Active(false);
+                                    log(format!(
+                                        "Connection attempt {} to {address} failed: {err}",
+                                        peer.connection_attempts
+                                    ));
+                                });
                             })
                             .unwrap();
                         continue;
