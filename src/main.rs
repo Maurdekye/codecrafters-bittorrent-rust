@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, ArgAction};
 use download::download_piece_from_peer;
 use error::BitTorrentError;
 use regex::Regex;
@@ -161,6 +161,11 @@ struct DownloadV2Args {
     /// Number of workers
     #[arg(short, long, default_value_t = 5)]
     workers: usize,
+
+    /// Print verbose logging information
+    #[arg(short, long, action = ArgAction::SetTrue)]
+    verbose: bool,
+
 }
 
 fn pathbuf_parse(val: &str) -> Result<PathBuf, String> {
@@ -239,6 +244,7 @@ fn main() -> Result<(), BitTorrentError> {
                     .with_context(|| "Error connecting to peer")?,
                 bitfield: Vec::new(),
                 port: handshake_args.port,
+                verbose: false,
             };
             let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
@@ -278,7 +284,9 @@ fn main() -> Result<(), BitTorrentError> {
                 &download_args.peer_id,
                 download_args.port,
                 download_args.workers,
+                download_args.verbose,
             )?;
+            println!("Saving to file");
             meta_info
                 .save_to_path(&download_args.output, full_file)
                 .with_context(|| "Error saving torrent file(s)")?;

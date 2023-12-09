@@ -26,8 +26,8 @@ use super::{Corkboard, Piece, PieceState};
 const INTERVAL: u64 = 1;
 
 /// Seeder thread: allows incoming peer connections and feeds torrent data back to them
-pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<(), BitTorrentError> {
-    let log = |msg: String| println!("[{}][S] {msg}", timestr());
+pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: bool) -> Result<(), BitTorrentError> {
+    let log = |msg: String| if verbose{println!("[{}][S] {msg}", timestr())};
 
     log(format!("Seeder init"));
 
@@ -61,6 +61,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
                         peer_id,
                         port,
                         bitfield: Vec::new(),
+                        verbose,
                     };
 
                     // recieve handshake

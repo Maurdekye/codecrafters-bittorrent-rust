@@ -9,10 +9,12 @@ pub mod utp;
 pub trait PeerConnection {
     type Error: error::Error;
 
-    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, port: u16) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, port: u16, verbose: bool) -> Result<Self, Self::Error>
     where
         Self: Sized;
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, Self::Error>;
+
+    fn sever(&self) -> Result<(), Self::Error>;
 
     fn address(&self) -> &SocketAddr;
     fn meta_info(&self) -> &MetaInfo;

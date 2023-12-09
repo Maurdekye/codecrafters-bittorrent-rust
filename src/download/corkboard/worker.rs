@@ -14,13 +14,13 @@ use crate::{
 use super::{Benchmark, Corkboard, PeerState, PieceState};
 
 /// maximum number of time a given peer can be reused before it should be dropped
-const MAX_PEER_USES: usize = 5;
+const MAX_PEER_USES: usize = 500;
 /// time to wait before next check if no peers are available to take (milliseconds)
 const EMPTY_PEER_WAIT: u64 = 1000;
 /// conversion factor of bytes per millisecond to mebibites per second
 const MB_S: f64 = 1048.576;
 /// maximum reconnection attempts to be made to a given peer
-const MAX_RECONNECT_ATTEMPTS: usize = 5;
+// const MAX_RECONNECT_ATTEMPTS: usize = 5;
 
 enum PeerSearchResult<T: PeerConnection> {
     ConnectNew(SocketAddr),
@@ -77,6 +77,7 @@ where
                             .peers
                             .entry(address)
                             .and_modify(|peer| peer.state = PeerState::Active(false));
+                        connection.sever().unwrap();
                         PeerSearchResult::PromptRefetch
                     } else {
                         // existing peer is fine to reuse
@@ -202,6 +203,7 @@ fn finalize_download<T, F>(
     piece_id: usize,
     connection: &T,
     log: F,
+    verbose: bool,
 ) -> LoopAction
 where
     T: PeerConnection,
@@ -219,11 +221,12 @@ where
                         connection.address()
                     ));
 
-                    // mark peer as errored
+                    // mark peer as errored & sever connection
                     board
                         .peers
                         .entry(connection.address().clone())
                         .and_modify(|peer| peer.state = PeerState::Error);
+                    connection.sever().unwrap();
 
                     // mark piece as unfetched
                     board.pieces.get_mut(piece_id).map(|piece| {
@@ -265,6 +268,10 @@ where
                         .map_or(LoopAction::Continue, |piece| {
                             if piece.hash == sha1_hash(&data) {
                                 // if hash matches, store data & keep peer for next loop
+                                if !verbose {
+                                    println!("Downloaded piece {piece_id} from {}", connection.address());
+                                }
+
                                 piece.state = PieceState::Fetched(data);
                                 LoopAction::Pass
                             } else {
@@ -286,11 +293,11 @@ where
 /// Worker thread: connects to peers and downloads pieces from them
 /// * `corkboard`: shared corkboard for coordinating peer connections and downloaded pieces
 /// * `worker_id`: worker id number
-pub fn worker<T>(corkboard: Arc<RwLock<Corkboard>>, worker_id: usize) -> Result<(), BitTorrentError>
+pub fn worker<T>(corkboard: Arc<RwLock<Corkboard>>, worker_id: usize, verbose: bool) -> Result<(), BitTorrentError>
 where
     T: PeerConnection,
 {
-    let log = |msg: String| println!("[{}][{worker_id}] {msg}", timestr());
+    let log = |msg: String| if verbose {println!("[{}][{worker_id}] {msg}", timestr())};
     // stagger startup to prevent thrashing
     sleep((worker_id * 1000) as u64);
 
@@ -317,6 +324,7 @@ where
                     meta_info.clone(),
                     peer_id.to_string(),
                     port,
+                    verbose,
                 );
 
                 match connection_result {
@@ -391,7 +399,7 @@ where
 
         // ! mutual exclusion zone 3: finalize & store the downloaded piece
         if matches!(
-            finalize_download(&corkboard, result, duration, piece_id, &connection, log),
+            finalize_download(&corkboard, result, duration, piece_id, &connection, log, verbose),
             LoopAction::Continue
         ) {
             continue;

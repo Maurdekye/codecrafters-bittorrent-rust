@@ -1,8 +1,11 @@
 use std::{
     io::Write,
-    net::{SocketAddr, TcpStream},
-    sync::{Arc, Condvar, Mutex, mpsc::{Receiver, Sender, channel}},
-    thread,
+    net::{SocketAddr, TcpStream, Shutdown},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Condvar, Mutex,
+    },
+    thread, time::Duration,
 };
 
 use anyhow::Context;
@@ -32,7 +35,12 @@ const CHUNK_SIZE: u32 = 16384;
 /// number of requests that can be in flight at once
 const IN_FLIGHT: usize = 4;
 /// connection timeout when attempting to connect to a peer's tcp socket (seconds)
-const TCP_TIMEOUT: u64 = 1;
+const TCP_CONNECTION_TIMEOUT: u64 = 1;
+/// timeout while waiting for a peer message to arrive (seconds)
+const TCP_READ_TIMEOUT: u64 = 180;
+/// maximum number of allowed rejections before the peer is disconnected
+const MAX_REJECTIONS: usize = 64;
+
 
 #[derive(Debug)]
 pub struct TcpPeer {
@@ -43,29 +51,36 @@ pub struct TcpPeer {
     pub stream: TcpStream,
     pub bitfield: Vec<bool>,
     pub port: u16,
+    pub verbose: bool,
 }
 
 impl TcpPeer {
     /// Wait for a peer message to arrive from the peer and return it.
     pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
-        println!("[{}] <...< {}", timestr(), self.address);
+        if self.verbose {
+            println!("[{}] <...< {}", timestr(), self.address);
+        }
         let buf = read_n_bytes(&mut self.stream, 4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
-        // println!("[{}] <.<.< {} {}b", timestr(), self.address, length);
+        // if self.verbose {println!("[{}] <.<.< {} {}b", timestr(), self.address, length);}
         let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
         let response = PeerMessage::decode(&buf)?;
-        println!(
-            "[{}] <<<<< {} {}",
-            timestr(),
-            self.address,
-            cap_length(format!("{response:?}"), 100)
-        );
+        if self.verbose {
+            println!(
+                "[{}] <<<<< {} {}",
+                timestr(),
+                self.address,
+                cap_length(format!("{response:?}"), 100)
+            );
+        }
         Ok(response)
     }
 
     /// Send a peer message `message` to the peer.
     pub fn send_peer_message(&mut self, message: PeerMessage) -> Result<(), BitTorrentError> {
-        println!("[{}] >>>>> {} {:?}", timestr(), self.address, message);
+        if self.verbose {
+            println!("[{}] >>>>> {} {:?}", timestr(), self.address, message);
+        }
         self.stream
             .write(&message.encode()?)
             .with_context(|| "Error sending peer message")?;
@@ -90,6 +105,7 @@ impl TcpPeer {
             stream: self.stream.try_clone()?,
             bitfield: self.bitfield.clone(),
             port: self.port,
+            verbose: self.verbose,
         })
     }
 }
@@ -103,16 +119,20 @@ impl PeerConnection for TcpPeer {
         meta_info: MetaInfo,
         peer_id: String,
         port: u16,
+        verbose: bool,
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(TCP_TIMEOUT))
+            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(TCP_CONNECTION_TIMEOUT))
                 .with_context(|| "Error connecting to peer")?,
             meta_info,
             peer_id,
             bitfield: vec![],
             port,
+            verbose,
         };
+
+        connection.stream.set_read_timeout(Some(Duration::from_secs(TCP_READ_TIMEOUT)))?;
 
         // send handshake
         connection.handshake()?;
@@ -166,7 +186,9 @@ impl PeerConnection for TcpPeer {
         loop {
             match connection.await_peer_message()? {
                 PeerMessage::Extension(ExtensionMessage::Handshake(handshake)) => {
-                    println!("{:#?}", handshake);
+                    if connection.verbose {
+                        println!("{:#?}", handshake);
+                    }
                     break;
                 }
                 _ => (),
@@ -237,7 +259,7 @@ impl PeerConnection for TcpPeer {
                                 unchoked = choked_cvar.wait(unchoked).unwrap();
                             }
                             in_flight.take();
-        
+
                             let message_length = (chunk_size - chunk_begin).min(CHUNK_SIZE);
                             connection.send_peer_message(PeerMessage::Request(RequestMessage {
                                 index: piece_id,
@@ -245,7 +267,7 @@ impl PeerConnection for TcpPeer {
                                 length: message_length,
                             }))?;
                         }
-                        Err(_) => break
+                        Err(_) => break,
                     }
                 }
 
@@ -262,6 +284,7 @@ impl PeerConnection for TcpPeer {
 
             thread::spawn(move || {
                 let (unchoked, choked_cvar) = &*choked;
+                let mut rejections = 0;
 
                 let mut pieces = Vec::new();
 
@@ -274,6 +297,10 @@ impl PeerConnection for TcpPeer {
                         PeerMessage::RejectRequest(request) => {
                             req_send.lock().unwrap().send(request.begin).unwrap();
                             in_flight.put();
+                            rejections += 1;
+                            if rejections >= MAX_REJECTIONS {
+                                return Err(bterror!("Too many rejections"));
+                            }
                         }
                         PeerMessage::Choke => {
                             let mut unchoked = unchoked.lock().unwrap();
@@ -292,9 +319,10 @@ impl PeerConnection for TcpPeer {
                     }
                 }
 
-                Ok::<Vec<PieceMessage>, BitTorrentError>(pieces)
+                Ok(pieces)
             })
         };
+        drop(req_recv);
 
         let mut responses = reciever.join().unwrap()?;
 
@@ -318,6 +346,11 @@ impl PeerConnection for TcpPeer {
             self.send_peer_message(PeerMessage::Have(piece_id))?;
             Ok(full_piece)
         }
+    }
+
+    fn sever(&self) -> Result<(), Self::Error> {
+        self.stream.shutdown(Shutdown::Both)?;
+        Ok(())
     }
 
     fn address(&self) -> &SocketAddr {

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs::{self, create_dir_all}, path::PathBuf};
 
 use crate::{
     error::BitTorrentError,
@@ -128,6 +128,7 @@ impl MetaInfo {
                     for path_part in &file.path {
                         file_path.push(path_part);
                     }
+                    create_dir_all(file_path.parent().unwrap())?;
                     let file_data = &data_stream[..file.length];
                     fs::write(file_path, file_data)?;
                     data_stream = &data_stream[file.length..];

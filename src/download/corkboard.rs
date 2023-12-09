@@ -119,8 +119,9 @@ pub fn corkboard_download<T: PeerConnection>(
     peer_id: &str,
     port: u16,
     workers: usize,
+    verbose: bool,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let log = |msg: String| println!("[{}] {msg}", timestr());
+    let log = |msg: String| if verbose {println!("[{}] {msg}", timestr())};
 
     // create corkboard
     log(format!("Initializing Corkboard"));
@@ -130,10 +131,14 @@ pub fn corkboard_download<T: PeerConnection>(
         port,
     )?));
 
-    log(format!(
-        "Preparing to download {} pieces",
-        corkboard.clone().read().unwrap().pieces.len(),
-    ));
+    if verbose {
+        println!("Starting download");
+    } else {
+        log(format!(
+            "Preparing to download {} pieces",
+            corkboard.clone().read().unwrap().pieces.len(),
+        ));
+    }
 
     // spawn subtasks
     log(format!("Starting subtasks"));
@@ -144,7 +149,7 @@ pub fn corkboard_download<T: PeerConnection>(
         ].map(|task| {
         let corkboard = corkboard.clone();
         let (notify, alarm) = channel();
-        let handle = thread::spawn(move || task(corkboard, alarm));
+        let handle = thread::spawn(move || task(corkboard, alarm, verbose));
         (handle, notify)
     });
 
@@ -153,7 +158,7 @@ pub fn corkboard_download<T: PeerConnection>(
     let workers = (0..workers)
         .map(|worker_id| {
             let corkboard = corkboard.clone();
-            thread::spawn(move || worker::worker::<T>(corkboard, worker_id))
+            thread::spawn(move || worker::worker::<T>(corkboard, worker_id, verbose))
         })
         .collect::<Vec<_>>();
 
@@ -161,6 +166,10 @@ pub fn corkboard_download<T: PeerConnection>(
     log(format!("Waiting for workers to finish"));
     for worker in workers {
         worker.join().unwrap()?;
+    }
+
+    if !verbose {
+        println!("Finished downloading");
     }
 
     // send kill signals to subtasks

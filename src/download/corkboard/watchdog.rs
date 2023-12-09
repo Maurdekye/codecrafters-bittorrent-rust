@@ -14,8 +14,16 @@ use super::{Corkboard, Peer, PeerState};
 const RETRY_INTERVAL: u64 = 5;
 
 /// Watchdog thread: periodically fetches and updates the peer list by contacting the tracker
-pub fn watchdog(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<(), BitTorrentError> {
-    let log = |msg: String| println!("[{}][W] {msg}", timestr());
+pub fn watchdog(
+    corkboard: Arc<RwLock<Corkboard>>,
+    alarm: Receiver<()>,
+    verbose: bool,
+) -> Result<(), BitTorrentError> {
+    let log = |msg: String| {
+        if verbose {
+            println!("[{}][W] {msg}", timestr())
+        }
+    };
 
     log(format!("Watchdog init"));
 
@@ -40,26 +48,29 @@ pub fn watchdog(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Resul
             Ok((mut peers, interval)) => {
                 log(format!("Found {} peers", peers.len()));
                 board.peers.iter_mut().for_each(|(address, peer)| {
-                    if peer.state != PeerState::Error {
-                        peer.state = match peers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, peer)| *peer == address)
-                            .map(|(i, _)| i)
-                        {
-                            Some(i) => {
-                                peers.remove(i);
-                                peer.connection_attempts = 0;
-                                PeerState::Fresh
+                    match peers
+                        .iter()
+                        .enumerate()
+                        .find(|(_, peer)| *peer == address)
+                        .map(|(i, _)| i)
+                    {
+                        Some(i) => {
+                            peers.remove(i);
+                            peer.connection_attempts = 0;
+                            if !matches!(
+                                peer.state,
+                                PeerState::Error | PeerState::Active(true) | PeerState::Connecting
+                            ) {
+                                peer.state = PeerState::Fresh;
                             }
-                            None => PeerState::Inactive,
                         }
+                        None => (),
                     }
                 });
                 board
                     .peers
                     .extend(peers.into_iter().map(|address| (address, Peer::new())));
-                interval as u64
+                interval.min(120) as u64
             }
             Err(err) => {
                 log(format!("Error querying tracker: {}", err));

@@ -1,4 +1,4 @@
-use std::{net::UdpSocket, time::SystemTime};
+use std::{net::UdpSocket, time::{SystemTime, Duration}};
 
 use anyhow::Context;
 
@@ -13,6 +13,9 @@ use crate::{
     tracker::{SuccessfulTrackerResponse, TrackerResponse},
     util::{querystring_encode, read_datagram},
 };
+
+
+const TRACKER_QUERY_TIMEOUT: u64 = 60;
 
 lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
@@ -123,6 +126,7 @@ impl UdpTrackerConnection {
                 Ok(connection)
             })
             .with_context(|| "Error connecting to tracker")?;
+        connection.set_read_timeout(Some(Duration::from_secs(TRACKER_QUERY_TIMEOUT)))?;
         Ok(UdpTrackerConnection {
             connection: connection,
             last_connection: None,

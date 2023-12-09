@@ -41,7 +41,7 @@ impl UtpPeer {
 impl PeerConnection for UtpPeer {
     type Error = BitTorrentError;
 
-    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16, _verbose: bool) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
@@ -80,5 +80,9 @@ impl PeerConnection for UtpPeer {
 
     fn bitfield(&self) -> &Vec<bool> {
         &self.bitfield
+    }
+
+    fn sever(&self) -> Result<(), Self::Error> {
+        todo!()
     }
 }
