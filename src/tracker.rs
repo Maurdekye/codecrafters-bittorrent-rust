@@ -46,8 +46,8 @@ impl SuccessfulTrackerResponse {
 }
 
 /// Query the tracker for a list of peers for the torrent associated with the `meta_info` object passed.
-/// deprecated; use `multimodal_tracker::Tracker` instead 
-#[deprecated = "use `multimodal_tracker::Tracker` instead"]
+/// deprecated; use `multimodal::Tracker` instead 
+#[deprecated = "use `multimodal::Tracker` instead"]
 #[allow(unused)]
 pub fn query_tracker(
     meta_info: &MetaInfo,

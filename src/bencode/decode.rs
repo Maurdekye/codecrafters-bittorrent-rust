@@ -11,6 +11,12 @@ lazy_static! {
     pub static ref INTEGER_RE: Regex = Regex::new(r"^i(-?\d+)e").unwrap();
 }
 
+pub fn decode_maybe_b64_string(bytes: &[u8]) -> String {
+    from_utf8(bytes)
+            .map(String::from)
+            .unwrap_or_else(|_| format!("base64:{}", general_purpose::STANDARD_NO_PAD.encode(bytes)))
+}
+
 /// Decode a bencoded dictionary into a `serde_json::Value`.
 fn decode_dictionary(data: &mut &[u8]) -> Result<Value, BitTorrentError> {
     *data = &data[1..];
@@ -110,10 +116,7 @@ fn decode_string(data: &mut &[u8]) -> Result<Value, BitTorrentError> {
             data.len()
         ))
     } else {
-        let bytes = &data[content_start..content_end];
-        let content = from_utf8(bytes)
-            .map(String::from)
-            .unwrap_or_else(|_| format!("base64:{}", general_purpose::STANDARD_NO_PAD.encode(bytes)));
+        let content = decode_maybe_b64_string(&data[content_start..content_end]);
 
         *data = &data[content_end..];
 

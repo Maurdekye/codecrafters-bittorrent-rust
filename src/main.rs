@@ -1,3 +1,5 @@
+#![feature(ip_bits)]
+
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpStream, SocketAddr},
@@ -236,6 +238,7 @@ fn main() -> Result<(), BitTorrentError> {
                 stream: TcpStream::connect(&handshake_args.peer)
                     .with_context(|| "Error connecting to peer")?,
                 bitfield: Vec::new(),
+                port: handshake_args.port,
             };
             let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));

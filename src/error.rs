@@ -46,4 +46,10 @@ impl From<std::io::Error> for BitTorrentError {
     }
 }
 
+impl From<serde_json::Error> for BitTorrentError {
+    fn from(value: serde_json::Error) -> Self {
+        BitTorrentError::new(value.to_string())
+    }
+}
+
 impl Error for BitTorrentError {}

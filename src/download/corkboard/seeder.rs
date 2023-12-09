@@ -14,7 +14,7 @@ use crate::{
     bterror,
     error::BitTorrentError,
     peer::{
-        message::{BitfieldMessage, HandshakeMessage, PeerMessage, PieceMessage},
+        message::{HandshakeMessage, PeerMessage, PieceMessage},
         tcp::TcpPeer,
     },
     util::{read_n_bytes, timestr},
@@ -37,6 +37,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
     //     .unwrap();
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     listener.set_nonblocking(true)?;
+    let port = corkboard.read().unwrap().port;
 
     for stream in listener.incoming() {
         match stream {
@@ -58,6 +59,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
                         address,
                         meta_info,
                         peer_id,
+                        port,
                         bitfield: Vec::new(),
                     };
 
@@ -83,8 +85,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
                                 .collect::<Vec<_>>()
                         })
                         .unwrap();
-                    let bitfield_message = PeerMessage::Bitfield(BitfieldMessage { bitfield });
-                    connection.send_peer_message(&bitfield_message)?;
+                    connection.send_peer_message(PeerMessage::Bitfield(bitfield))?;
 
                     // wait for interested
                     loop {
@@ -101,7 +102,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
                     }
 
                     // send unchoke
-                    connection.send_peer_message(&PeerMessage::Unchoke)?;
+                    connection.send_peer_message(PeerMessage::Unchoke)?;
 
                     // respond to data requests
                     loop {
@@ -133,7 +134,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result<
                                             .collect())
                                     })
                                     .unwrap()?;
-                                connection.send_peer_message(&PeerMessage::Piece(
+                                connection.send_peer_message(PeerMessage::Piece(
                                     PieceMessage {
                                         index: request.index,
                                         begin: request.begin,

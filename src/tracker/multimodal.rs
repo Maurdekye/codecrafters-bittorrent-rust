@@ -1,18 +1,17 @@
 use std::{net::UdpSocket, time::SystemTime};
 
 use anyhow::Context;
-use base64::{engine::general_purpose, Engine};
 
 use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{
-    bencode::decode::consume_bencoded_value,
+    bencode::decode::{consume_bencoded_value, decode_maybe_b64_string},
     bterror,
     error::BitTorrentError,
     info::MetaInfo,
     tracker::{SuccessfulTrackerResponse, TrackerResponse},
-    util::{read_datagram, querystring_encode},
+    util::{querystring_encode, read_datagram},
 };
 
 lazy_static! {
@@ -210,10 +209,7 @@ impl UdpTrackerConnection {
         // let leechers = u32::from_be_bytes(response_bytes[12..16].try_into().unwrap());
         // let seeders = u32::from_be_bytes(response_bytes[16..20].try_into().unwrap());
 
-        let peers = format!(
-            "base64:{}",
-            general_purpose::STANDARD_NO_PAD.encode(&response_bytes[20..])
-        );
+        let peers = decode_maybe_b64_string(&response_bytes[20..]);
 
         Ok(SuccessfulTrackerResponse { interval, peers })
     }

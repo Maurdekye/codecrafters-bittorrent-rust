@@ -44,6 +44,7 @@ pub fn bencode_value(value: Value) -> Result<Vec<u8>, BitTorrentError> {
                 .chain(
                     pairs
                         .into_iter()
+                        .filter(|(_, v)| !v.is_null())
                         .flat_map(|(k, v)| [bencode_value(Value::String(k)), bencode_value(v)])
                         .collect::<Result<Vec<_>, _>>()?
                         .into_iter()

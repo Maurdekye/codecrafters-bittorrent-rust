@@ -1,11 +1,8 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        mpsc::{channel, Receiver},
-        Arc, RwLock,
-    },
-    thread::{self},
+    sync::{mpsc::channel, Arc, RwLock},
+    thread,
 };
 
 use crate::{bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection, util::timestr};
@@ -61,6 +58,7 @@ pub struct Peer {
     pub state: PeerState,
     pub benchmarks: Vec<Benchmark>,
     pub performance: Option<f64>,
+    pub connection_attempts: usize,
 }
 
 impl Peer {
@@ -69,6 +67,7 @@ impl Peer {
             state: PeerState::Fresh,
             benchmarks: Vec::new(),
             performance: None,
+            connection_attempts: 0,
         }
     }
 
@@ -93,10 +92,10 @@ impl Peer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerState {
     Fresh,
+    Connecting,
     Active(bool),
     Inactive,
     Superceded,
-    Connecting,
     Error,
 }
 
@@ -123,8 +122,6 @@ pub fn corkboard_download<T: PeerConnection>(
 ) -> Result<Vec<u8>, BitTorrentError> {
     let log = |msg: String| println!("[{}] {msg}", timestr());
 
-    // Preparation
-
     // create corkboard
     log(format!("Initializing Corkboard"));
     let corkboard: Arc<RwLock<Corkboard>> = Arc::new(RwLock::new(Corkboard::new(
@@ -138,23 +135,18 @@ pub fn corkboard_download<T: PeerConnection>(
         corkboard.clone().read().unwrap().pieces.len(),
     ));
 
-    // Spawn subtasks
-
-    let start_task =
-        |task: fn(Arc<RwLock<Corkboard>>, Receiver<()>) -> Result<(), BitTorrentError>| {
-            let corkboard = corkboard.clone();
-            let (notify, alarm) = channel();
-            let handle = thread::spawn(move || task(corkboard, alarm));
-            (handle, notify)
-        };
-
-    // start subtasks
+    // spawn subtasks
     log(format!("Starting subtasks"));
     let tasks = [
-        start_task(monitor::monitor),
-        start_task(watchdog::watchdog),
-        start_task(seeder::seeder),
-    ];
+        monitor::monitor, 
+        watchdog::watchdog, 
+        seeder::seeder
+        ].map(|task| {
+        let corkboard = corkboard.clone();
+        let (notify, alarm) = channel();
+        let handle = thread::spawn(move || task(corkboard, alarm));
+        (handle, notify)
+    });
 
     // start workers
     log(format!("Starting workers"));
@@ -164,8 +156,6 @@ pub fn corkboard_download<T: PeerConnection>(
             thread::spawn(move || worker::worker::<T>(corkboard, worker_id))
         })
         .collect::<Vec<_>>();
-
-    // Block on subtasks
 
     // wait for workers to finish
     log(format!("Waiting for workers to finish"));

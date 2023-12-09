@@ -18,7 +18,7 @@ pub enum UtpMessage {
 #[allow(unused)]
 impl UtpMessage {
     fn encode(&self) -> Vec<u8> {
-        todo!()
+        unimplemented!()
     }
 }
 
@@ -41,7 +41,7 @@ impl UtpPeer {
 impl PeerConnection for UtpPeer {
     type Error = BitTorrentError;
 
-    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
@@ -67,7 +67,7 @@ impl PeerConnection for UtpPeer {
 
     #[allow(unused)]
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, Self::Error> {
-        todo!()
+        unimplemented!()
     }
 
     fn address(&self) -> &SocketAddr {

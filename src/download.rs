@@ -22,7 +22,7 @@ pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
     let tracker_response = tracker.query(&peer_id, port)?;
     let peers = tracker_response.peers()?;
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
-    let mut connection = T::new(*peer, meta_info.clone(), peer_id.to_string())?;
+    let mut connection = T::new(*peer, meta_info.clone(), peer_id.to_string(), port)?;
     connection.download_piece(piece_id)
 }
 
@@ -61,7 +61,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
         let peer_id = peer_id.to_string();
         thread::spawn(move || {
             // initialize connection
-            let mut connection = T::new(peer, meta_info, peer_id)?;
+            let mut connection = T::new(peer, meta_info, peer_id, port)?;
 
             // wait for messages
             loop {

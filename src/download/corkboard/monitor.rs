@@ -33,7 +33,7 @@ pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result
 
             // print results
             log(format!(""));
-            log(format!(">>>>>>>>>>>>><<<<<<<<<<<<<"));
+            log(format!("----------------------------"));
             log(format!(""));
             log(format!("Peer Stats:"));
             log(format!("Total Peers:   {total_peers}"));
@@ -49,7 +49,7 @@ pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Result
             log(format!("In Progress:   {in_progress_count}"));
             log(format!("Fetched:       {fetched_count}"));
             log(format!(""));
-            log(format!(">>>>>>>>>>>>><<<<<<<<<<<<<"));
+            log(format!("----------------------------"));
             log(format!(""));
 
         }).unwrap();

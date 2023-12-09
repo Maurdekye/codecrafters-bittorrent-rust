@@ -49,6 +49,7 @@ pub fn watchdog(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>) -> Resul
                         {
                             Some(i) => {
                                 peers.remove(i);
+                                peer.connection_attempts = 0;
                                 PeerState::Fresh
                             }
                             None => PeerState::Inactive,

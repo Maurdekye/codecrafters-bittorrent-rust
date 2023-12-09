@@ -1,36 +1,42 @@
-use serde::{Serialize, Deserialize};
+use std::iter::once;
 
-use crate::{error::BitTorrentError, util::{decode_bitfield_be, encode_bitfield_be}, bterror, info::MetaInfo};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Number, Value};
 
+use crate::bencode::encode::bencode_value;
+use crate::{
+    bencode::decode::consume_bencoded_value,
+    bterror,
+    error::BitTorrentError,
+    info::MetaInfo,
+    util::{decode_bitfield_be, encode_bitfield_be},
+};
 
 #[derive(Debug)]
 pub enum PeerMessage {
-    Keepalive,
-    Choke,
-    Unchoke,
-    Interested,
-    NotInterested,
-    Have(u32),
-    Bitfield(BitfieldMessage),
-    Request(RequestMessage),
-    Piece(PieceMessage),
-    Cancel(CancelMessage),
-}
+    // base protocol messages
+    Keepalive,               // empty id
+    Choke,                   // 0
+    Unchoke,                 // 1
+    Interested,              // 2
+    NotInterested,           // 3
+    Have(u32),               // 4
+    Bitfield(Vec<bool>),     // 5
+    Request(RequestMessage), // 6
+    Piece(PieceMessage),     // 7
+    Cancel(CancelMessage),   // 8
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct BitfieldMessage {
-    pub bitfield: Vec<bool>,
+    // extension messages
+    Port(u16),                      // 9
+    HaveAll,                        // 14
+    HaveNone,                       // 15
+    RejectRequest(RequestMessage),  // 16
+    AllowFast(u32),                 // 17
+    Extension(ExtensionMessage),    // 20
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RequestMessage {
-    pub index: u32,
-    pub begin: u32,
-    pub length: u32,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct CancelMessage {
     pub index: u32,
     pub begin: u32,
     pub length: u32,
@@ -43,84 +49,147 @@ pub struct PieceMessage {
     pub block: Vec<u8>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CancelMessage {
+    pub index: u32,
+    pub begin: u32,
+    pub length: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ExtensionMessage {
+    Handshake(ExtensionHandshake),
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ExtensionHandshake {
+    #[serde(rename = "m")]
+    pub messages: Option<Map<String, Value>>,
+    #[serde(rename = "p")]
+    pub port: Option<u16>,
+    #[serde(rename = "v")]
+    pub version: Option<String>,
+    pub yourip: Option<String>,
+    pub ipv6: Option<String>,
+    pub ipv4: Option<String>,
+    pub reqq: Option<Number>,
+}
+
+impl ExtensionMessage {
+    pub fn decode(bytes: &[u8]) -> Result<Self, BitTorrentError> {
+        match bytes[0] {
+            0 => Ok(Self::Handshake(serde_json::from_value(
+                consume_bencoded_value(&mut &bytes[1..])?,
+            )?)),
+            byte => Err(bterror!("Invalid extension message id: {byte}")),
+        }
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, BitTorrentError> {
+        match self {
+            Self::Handshake(handshake) => bencode_value(serde_json::to_value(handshake)?),
+        }
+    }
+}
+
 impl PeerMessage {
     /// Decode a peer message from a byte array.
     pub fn decode(bytes: &[u8]) -> Result<Self, BitTorrentError> {
         match bytes.get(0) {
             None => Ok(Self::Keepalive),
-            Some(0u8) => Ok(Self::Choke),
-            Some(1u8) => Ok(Self::Unchoke),
-            Some(2u8) => Ok(Self::Interested),
-            Some(3u8) => Ok(Self::NotInterested),
-            Some(4u8) => Ok(Self::Have(u32::from_be_bytes(
+            Some(0) => Ok(Self::Choke),
+            Some(1) => Ok(Self::Unchoke),
+            Some(2) => Ok(Self::Interested),
+            Some(3) => Ok(Self::NotInterested),
+            Some(4) => Ok(Self::Have(u32::from_be_bytes(
                 bytes[1..5].try_into().unwrap(),
             ))),
-            Some(5u8) => Ok(Self::Bitfield(BitfieldMessage {
-                bitfield: bytes[1..]
+            Some(5) => Ok(Self::Bitfield(
+                bytes[1..]
                     .iter()
                     .copied()
                     .flat_map(decode_bitfield_be)
                     .collect(),
-            })),
-            Some(6u8) => Ok(Self::Request(RequestMessage {
+            )),
+            Some(6) => Ok(Self::Request(RequestMessage {
                 index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
                 begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
                 length: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
             })),
-            Some(7u8) => Ok(Self::Piece(PieceMessage {
+            Some(7) => Ok(Self::Piece(PieceMessage {
                 index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
                 begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
                 block: bytes[9..].to_vec(),
             })),
-            Some(8u8) => Ok(Self::Cancel(CancelMessage {
+            Some(8) => Ok(Self::Cancel(CancelMessage {
                 index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
                 begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
                 length: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
             })),
+            Some(9) => Ok(Self::Port(u16::from_be_bytes(
+                bytes[1..3].try_into().unwrap(),
+            ))),
+            Some(14) => Ok(Self::HaveAll),
+            Some(15) => Ok(Self::HaveNone),
+            Some(16) => Ok(Self::RejectRequest(RequestMessage {
+                index: u32::from_be_bytes(bytes[1..5].try_into().unwrap()),
+                begin: u32::from_be_bytes(bytes[5..9].try_into().unwrap()),
+                length: u32::from_be_bytes(bytes[9..13].try_into().unwrap()),
+            })),
+            Some(17) => Ok(Self::AllowFast(u32::from_be_bytes(
+                bytes[1..5].try_into().unwrap(),
+            ))),
+            Some(20) => Ok(Self::Extension(ExtensionMessage::decode(&bytes[1..])?)),
             Some(byte) => Err(bterror!("Invalid peer message: {byte}")),
         }
     }
 
     /// Encode a peer message into a byte array.
     pub fn encode(&self) -> Result<Vec<u8>, BitTorrentError> {
+        // dbg!(&self);
         let base_message: Vec<u8> = match self {
             Self::Keepalive => vec![],
             Self::Choke => vec![0],
             Self::Unchoke => vec![1],
             Self::Interested => vec![2],
             Self::NotInterested => vec![3],
-            Self::Have(index) => vec![4].into_iter().chain(index.to_be_bytes()).collect(),
-            Self::Bitfield(bitfield) => vec![5]
-                .into_iter()
+            Self::Have(index) => once(4).chain(index.to_be_bytes()).collect(),
+            Self::Bitfield(bitfield) => once(5) 
                 .chain(
                     bitfield
-                        .bitfield
                         .chunks(8)
                         .map(|bits| encode_bitfield_be(bits.try_into().unwrap())),
                 )
                 .collect(),
-            Self::Request(req) => vec![6]
-                .into_iter()
+            Self::Request(req) => once(6) 
                 .chain(req.index.to_be_bytes())
                 .chain(req.begin.to_be_bytes())
                 .chain(req.length.to_be_bytes())
                 .collect(),
-            Self::Piece(piece) => vec![7]
-                .into_iter()
+            Self::Piece(piece) => once(7) 
                 .chain(piece.index.to_be_bytes())
                 .chain(piece.begin.to_be_bytes())
                 .chain(piece.block.clone())
                 .collect(),
-            Self::Cancel(cancel) => vec![8]
-                .into_iter()
+            Self::Cancel(cancel) => once(8) 
                 .chain(cancel.index.to_be_bytes())
                 .chain(cancel.begin.to_be_bytes())
                 .chain(cancel.length.to_be_bytes())
                 .collect(),
+            Self::Port(port) => once(9).chain(port.to_be_bytes()).collect(),
+            Self::HaveAll => vec![14],
+            Self::HaveNone => vec![15],
+            Self::RejectRequest(req) => once(16) 
+                .chain(req.index.to_be_bytes())
+                .chain(req.begin.to_be_bytes())
+                .chain(req.length.to_be_bytes())
+                .collect(),
+            Self::AllowFast(index) => once(17).chain(index.to_be_bytes()).collect(),
+            Self::Extension(ext) => once(20).chain(ext.encode()?).collect(),
         };
         let length = base_message.len() as u32;
         Ok(length
-            .to_ne_bytes()
+            .to_be_bytes()
             .into_iter()
             .chain(base_message)
             .collect())
@@ -152,10 +221,18 @@ impl HandshakeMessage {
 
     /// Encode a handshake message into a byte array.
     pub fn encode(&self) -> Vec<u8> {
-        [19u8]
-            .iter()
+        [19].iter()
             .chain(b"BitTorrent protocol".into_iter())
-            .chain(&[0; 8])
+            .chain(&[
+                0b00000000, 
+                0b00000000, 
+                0b00000000, 
+                0b00000000, 
+                0b00000000, 
+                0b00011000, 
+                0b00000000,
+                0b00000101,
+            ])
             .chain(&self.info_hash)
             .chain(&self.peer_id)
             .copied()

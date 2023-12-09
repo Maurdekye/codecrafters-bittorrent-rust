@@ -19,6 +19,8 @@ const MAX_PEER_USES: usize = 5;
 const EMPTY_PEER_WAIT: u64 = 1000;
 /// conversion factor of bytes per millisecond to mebibites per second
 const MB_S: f64 = 1048.576;
+/// maximum reconnection attempts to be made to a given peer
+const MAX_RECONNECT_ATTEMPTS: usize = 5;
 
 enum PeerSearchResult<T: PeerConnection> {
     ConnectNew(SocketAddr),
@@ -114,7 +116,10 @@ where
                             board
                                 .peers
                                 .entry(address)
-                                .and_modify(|peer| peer.state = PeerState::Connecting);
+                                .and_modify(|peer| {
+                                    peer.connection_attempts += 1;
+                                    peer.state = PeerState::Connecting;
+                                });
                             PeerSearchResult::ConnectNew(address)
                         }
 
@@ -290,6 +295,7 @@ where
 
     let mut active_connection: Option<T> = None;
     let mut uses = 0;
+    let port = corkboard.read().unwrap().port;
 
     loop {
         // ! mutual exclusion zone 1: search for a peer to use / connect to
@@ -300,7 +306,7 @@ where
             PeerSearchResult::ConnectNew(address) => {
                 // try to connect to the new peer
                 let connection_result =
-                    T::new(address.clone(), meta_info.clone(), peer_id.to_string());
+                    T::new(address.clone(), meta_info.clone(), peer_id.to_string(), port);
 
                 match connection_result {
                     // if successful, mark peer as active & claimed
@@ -321,14 +327,21 @@ where
 
                     // if unsuccessful, mark peer as errored and try another one
                     Err(err) => {
-                        log(format!("Failed to connect to {address}: {err}"));
                         corkboard
                             .write()
                             .map(|mut board| {
                                 board
                                     .peers
                                     .entry(address.clone())
-                                    .and_modify(|peer| peer.state = PeerState::Error);
+                                    .and_modify(|peer| 
+                                        if peer.connection_attempts < MAX_RECONNECT_ATTEMPTS {
+                                            log(format!("Connection attempt {} to {address} failed: {err}", peer.connection_attempts));
+                                            peer.state = PeerState::Active(false);
+                                        } else {
+                                            log(format!("Connection attempt {} to {address} failed, marking as errored: {err}", peer.connection_attempts));
+                                            peer.state = PeerState::Error;
+                                        }
+                                    );
                             })
                             .unwrap();
                         continue;
