@@ -1,11 +1,12 @@
 use std::{
+    io,
     net::TcpListener,
     sync::{
         mpsc::{Receiver, RecvTimeoutError},
         Arc, RwLock,
     },
     thread,
-    time::Duration, io,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -17,7 +18,7 @@ use crate::{
         message::{HandshakeMessage, PeerMessage, PieceMessage},
         tcp::TcpPeer,
     },
-    util::{timestr, read_n_bytes_timeout_busy},
+    util::{read_n_bytes, timestr},
 };
 
 use super::{Corkboard, Piece, PieceState};
@@ -26,8 +27,16 @@ use super::{Corkboard, Piece, PieceState};
 const INTERVAL: u64 = 1;
 
 /// Seeder thread: allows incoming peer connections and feeds torrent data back to them
-pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: bool) -> Result<(), BitTorrentError> {
-    let log = |msg: String| if verbose{println!("[{}][S] {msg}", timestr())};
+pub fn seeder(
+    corkboard: Arc<RwLock<Corkboard>>,
+    alarm: Receiver<()>,
+    verbose: bool,
+) -> Result<(), BitTorrentError> {
+    let log = |msg: String| {
+        if verbose {
+            println!("[{}][S] {msg}", timestr())
+        }
+    };
 
     log(format!("Seeder init"));
 
@@ -67,7 +76,7 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: b
 
                     // recieve handshake
                     let handshake =
-                        HandshakeMessage::decode(&read_n_bytes_timeout_busy(&mut connection.stream, 68, connection.timeout)?)?;
+                        HandshakeMessage::decode(&read_n_bytes(&mut connection.stream, 68)?)?;
                     log(format!(
                         "{address} peer id: {}",
                         std::str::from_utf8(&handshake.peer_id).context("Peer id not bytes")?
@@ -136,13 +145,11 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: b
                                             .collect())
                                     })
                                     .unwrap()?;
-                                connection.send_peer_message(PeerMessage::Piece(
-                                    PieceMessage {
-                                        index: request.index,
-                                        begin: request.begin,
-                                        block: chunk_data,
-                                    },
-                                ))?;
+                                connection.send_peer_message(PeerMessage::Piece(PieceMessage {
+                                    index: request.index,
+                                    begin: request.begin,
+                                    block: chunk_data,
+                                }))?;
                             }
                             _ => {}
                         }

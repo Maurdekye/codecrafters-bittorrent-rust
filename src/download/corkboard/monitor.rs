@@ -8,7 +8,7 @@ use super::{Corkboard, PeerState, PieceState};
 const INTERVAL: u64 = 5;
 
 /// Monitor thread: reads out statistics about the current download at regular intervals
-pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: bool) -> Result<(), BitTorrentError> {
+pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, _verbose: bool) -> Result<(), BitTorrentError> {
     let verbose = true;
     let log = |msg: String| if verbose {println!("[{}][M] {msg}", timestr())};
 

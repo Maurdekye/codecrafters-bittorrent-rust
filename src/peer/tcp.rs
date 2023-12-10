@@ -1,11 +1,7 @@
 use std::{
+    collections::VecDeque,
     io::Write,
     net::{Shutdown, SocketAddr, TcpStream},
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc, Condvar, Mutex,
-    },
-    thread,
     time::Duration,
 };
 
@@ -19,8 +15,7 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     info_field,
-    multithread::Semaphore,
-    util::{bytes_to_hex, cap_length, read_n_bytes, read_n_bytes_timeout_busy, sha1_hash, timestr},
+    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr},
 };
 
 use super::{
@@ -38,7 +33,7 @@ const IN_FLIGHT: usize = 4;
 /// connection timeout when attempting to connect to a peer's tcp socket (seconds)
 const TCP_CONNECTION_TIMEOUT: u64 = 1;
 /// timeout while waiting for a peer message to arrive (seconds)
-const TCP_READ_TIMEOUT: u64 = 180;
+const TCP_READWRITE_TIMEOUT: u64 = 180;
 /// maximum number of allowed rejections before the peer is disconnected
 const MAX_REJECTIONS: usize = 64;
 
@@ -59,17 +54,16 @@ impl TcpPeer {
     /// Wait for a peer message to arrive from the peer and return it.
     pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
         if self.verbose {
-            println!("[{}] <...< {}", timestr(), self.address);
+            println!("[{}][{}] <...<", timestr(), self.address);
         }
-        let buf = read_n_bytes_timeout_busy(&mut self.stream, 4, self.timeout)?;
+        let buf = read_n_bytes(&mut self.stream, 4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
-        // if self.verbose {println!("[{}] <.<.< {} {}b", timestr(), self.address, length);}
-        let buf: Vec<u8> =
-            read_n_bytes_timeout_busy(&mut self.stream, length as usize, self.timeout)?;
+        // if self.verbose {println!("[{}][{}] <.<.< {}b", timestr(), self.address, length);}
+        let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
         let response = PeerMessage::decode(&buf)?;
         if self.verbose {
             println!(
-                "[{}] <<<<< {} {}",
+                "[{}][{}] <<<<< {}",
                 timestr(),
                 self.address,
                 cap_length(format!("{response:?}"), 100)
@@ -81,11 +75,14 @@ impl TcpPeer {
     /// Send a peer message `message` to the peer.
     pub fn send_peer_message(&mut self, message: PeerMessage) -> Result<(), BitTorrentError> {
         if self.verbose {
-            println!("[{}] >>>>> {} {:?}", timestr(), self.address, message);
+            println!("[{}][{}] >...> {:?}", timestr(), self.address, message);
         }
         self.stream
             .write(&message.encode()?)
             .with_context(|| "Error sending peer message")?;
+        if self.verbose {
+            println!("[{}][{}] >>>>>", timestr(), self.address);
+        }
         Ok(())
     }
 
@@ -94,11 +91,12 @@ impl TcpPeer {
         self.stream
             .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
-        let buf = read_n_bytes_timeout_busy(&mut self.stream, 68, self.timeout)?;
+        let buf = read_n_bytes(&mut self.stream, 68)?;
         HandshakeMessage::decode(&buf)
     }
 
     /// Attempt to clone the connection
+    #[allow(unused)]
     pub fn try_clone(&self) -> Result<Self, BitTorrentError> {
         Ok(TcpPeer {
             address: self.address,
@@ -136,8 +134,15 @@ impl PeerConnection for TcpPeer {
             bitfield: vec![],
             port,
             verbose,
-            timeout: Some(Duration::from_secs(TCP_READ_TIMEOUT)),
+            timeout: Some(Duration::from_secs(TCP_READWRITE_TIMEOUT)),
         };
+
+        connection.stream.set_read_timeout(connection.timeout)?;
+        connection.stream.set_write_timeout(connection.timeout)?;
+
+        if verbose {
+            println!("[{}][{}] TCP Connection established", timestr(), peer);
+        }
 
         // send handshake
         connection.handshake()?;
@@ -182,17 +187,11 @@ impl PeerConnection for TcpPeer {
             },
         )))?;
 
-        // wait for extension handshake response
-        // while !matches!(
-        //     connection.await_peer_message()?,
-        //     PeerMessage::Extension(ExtensionMessage::Handshake(_))
-        // ) {}
-
         loop {
             match connection.await_peer_message()? {
                 PeerMessage::Extension(ExtensionMessage::Handshake(handshake)) => {
                     if connection.verbose {
-                        println!("{:#?}", handshake);
+                        println!("[{}][{}] {:#?}", timestr(), peer, handshake);
                     }
                     break;
                 }
@@ -234,106 +233,59 @@ impl PeerConnection for TcpPeer {
         let chunk_size = (self.meta_info.length() as u32 - piece_offset)
             .min(*info_field!(&self.meta_info.info, piece_length) as u32);
 
-        let chunks = (0..chunk_size).step_by(CHUNK_SIZE as usize);
-        let chunks_len = chunks.len();
+        let mut chunks = (0..chunk_size)
+            .step_by(CHUNK_SIZE as usize)
+            .collect::<VecDeque<_>>();
+        let total_chunks = chunks.len();
+        let mut pieces = Vec::new();
+        let mut in_flight = 0;
+        let mut rejections = 0;
+        let mut choked = false;
 
-        let choked = Arc::new((Mutex::new(true), Condvar::new()));
-        let in_flight = Arc::new(Semaphore::new(IN_FLIGHT));
-        let (req_send, req_recv): (Sender<u32>, Receiver<u32>) = channel();
-        chunks.for_each(|chunk| req_send.send(chunk).unwrap());
+        while pieces.len() < total_chunks {
+            // send packets that may be sent
+            while in_flight < IN_FLIGHT && !choked {
+                match chunks.pop_front() {
+                    Some(begin) => {
+                        let length = (chunk_size - begin).min(CHUNK_SIZE);
+                        self.send_peer_message(PeerMessage::Request(RequestMessage {
+                            index: piece_id,
+                            begin,
+                            length,
+                        }))?;
+                        in_flight += 1;
+                    }
+                    None => break,
+                }
+            }
 
-        let req_send = Arc::new(Mutex::new(req_send));
-        let req_recv = Arc::new(Mutex::new(req_recv));
-
-        // start requestor thread
-        {
-            let choked = choked.clone();
-            let in_flight = in_flight.clone();
-            let mut connection = self.try_clone()?;
-            let req_recv = req_recv.clone();
-
-            thread::spawn(move || {
-                let (unchoked, choked_cvar) = &*choked;
-
-                loop {
-                    let message = req_recv.lock().unwrap().recv();
-                    match message {
-                        Ok(chunk_begin) => {
-                            let mut unchoked = unchoked.lock().unwrap();
-                            while !*unchoked {
-                                unchoked = choked_cvar.wait(unchoked).unwrap();
-                            }
-                            in_flight.take();
-
-                            let message_length = (chunk_size - chunk_begin).min(CHUNK_SIZE);
-                            connection.send_peer_message(PeerMessage::Request(RequestMessage {
-                                index: piece_id,
-                                begin: chunk_begin,
-                                length: message_length,
-                            }))?;
-                        }
-                        Err(_) => break,
+            // respond to incoming data
+            match self.await_peer_message()? {
+                PeerMessage::Piece(piece) => {
+                    pieces.push(piece);
+                    in_flight -= 1;
+                }
+                PeerMessage::RejectRequest(request) => {
+                    chunks.push_back(request.begin);
+                    in_flight -= 1;
+                    rejections += 1;
+                    if rejections >= MAX_REJECTIONS {
+                        return Err(bterror!("Too many rejections"));
                     }
                 }
-
-                Ok::<(), BitTorrentError>(())
-            });
+                PeerMessage::Choke => {
+                    choked = true;
+                }
+                PeerMessage::Unchoke => {
+                    choked = false;
+                }
+                _ => {}
+            }
         }
 
-        // start reciever thread
-        let reciever = {
-            let choked = choked.clone();
-            let in_flight = in_flight.clone();
-            let mut connection = self.try_clone()?;
-            let req_send = req_send.clone();
-
-            thread::spawn(move || {
-                let (unchoked, choked_cvar) = &*choked;
-                let mut rejections = 0;
-
-                let mut pieces = Vec::new();
-
-                loop {
-                    match connection.await_peer_message()? {
-                        PeerMessage::Piece(piece) => {
-                            pieces.push(piece);
-                            in_flight.put();
-                        }
-                        PeerMessage::RejectRequest(request) => {
-                            req_send.lock().unwrap().send(request.begin).unwrap();
-                            in_flight.put();
-                            rejections += 1;
-                            if rejections >= MAX_REJECTIONS {
-                                return Err(bterror!("Too many rejections"));
-                            }
-                        }
-                        PeerMessage::Choke => {
-                            let mut unchoked = unchoked.lock().unwrap();
-                            *unchoked = false;
-                            choked_cvar.notify_one();
-                        }
-                        PeerMessage::Unchoke => {
-                            let mut unchoked = unchoked.lock().unwrap();
-                            *unchoked = true;
-                            choked_cvar.notify_one();
-                        }
-                        _ => {}
-                    }
-                    if pieces.len() == chunks_len {
-                        break;
-                    }
-                }
-
-                Ok(pieces)
-            })
-        };
-        drop(req_recv);
-
-        let mut responses = reciever.join().unwrap()?;
-
         // coallate chunks
-        responses.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
-        let full_piece: Vec<u8> = responses
+        pieces.sort_by(|PieceMessage { begin: a, .. }, PieceMessage { begin: b, .. }| a.cmp(b));
+        let full_piece: Vec<u8> = pieces
             .into_iter()
             .flat_map(|PieceMessage { block, .. }| block)
             .collect();

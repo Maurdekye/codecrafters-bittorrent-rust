@@ -37,6 +37,7 @@ pub fn read_n_bytes_timeout(
 }
 
 /// Read n bytes from a TcpStream and return them as a Vec<u8>, busy waiting until the bytes arrive
+#[allow(unused)]
 pub fn read_n_bytes_timeout_busy(
     stream: &mut TcpStream,
     mut n: usize,
@@ -67,8 +68,17 @@ pub fn read_n_bytes_timeout_busy(
     Ok(bytes)
 }
 
-pub fn read_n_bytes(stream: &mut TcpStream, n: usize) -> Result<Vec<u8>, BitTorrentError> {
-    read_n_bytes_timeout_busy(stream, n, None)
+pub fn read_n_bytes(stream: &mut TcpStream, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
+    let mut bytes = Vec::new();
+    while n > 0 {
+        let mut buf = vec![0u8; n];
+        let num_read = stream
+            .read(&mut buf)
+            .with_context(|| "Error reading tcp stream")?;
+        bytes.extend(&buf[..num_read]);
+        n -= num_read;
+    }
+    Ok(bytes)
 }
 
 pub fn read_datagram(stream: &mut UdpSocket) -> Result<Vec<u8>, BitTorrentError> {
