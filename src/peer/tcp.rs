@@ -1,11 +1,12 @@
 use std::{
     io::Write,
-    net::{SocketAddr, TcpStream, Shutdown},
+    net::{Shutdown, SocketAddr, TcpStream},
     sync::{
         mpsc::{channel, Receiver, Sender},
         Arc, Condvar, Mutex,
     },
-    thread, time::Duration,
+    thread,
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -19,7 +20,7 @@ use crate::{
     info::MetaInfo,
     info_field,
     multithread::Semaphore,
-    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr},
+    util::{bytes_to_hex, cap_length, read_n_bytes, read_n_bytes_timeout_busy, sha1_hash, timestr},
 };
 
 use super::{
@@ -41,7 +42,6 @@ const TCP_READ_TIMEOUT: u64 = 180;
 /// maximum number of allowed rejections before the peer is disconnected
 const MAX_REJECTIONS: usize = 64;
 
-
 #[derive(Debug)]
 pub struct TcpPeer {
     #[allow(unused)]
@@ -52,6 +52,7 @@ pub struct TcpPeer {
     pub bitfield: Vec<bool>,
     pub port: u16,
     pub verbose: bool,
+    pub timeout: Option<Duration>,
 }
 
 impl TcpPeer {
@@ -60,10 +61,11 @@ impl TcpPeer {
         if self.verbose {
             println!("[{}] <...< {}", timestr(), self.address);
         }
-        let buf = read_n_bytes(&mut self.stream, 4)?;
+        let buf = read_n_bytes_timeout_busy(&mut self.stream, 4, self.timeout)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
         // if self.verbose {println!("[{}] <.<.< {} {}b", timestr(), self.address, length);}
-        let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
+        let buf: Vec<u8> =
+            read_n_bytes_timeout_busy(&mut self.stream, length as usize, self.timeout)?;
         let response = PeerMessage::decode(&buf)?;
         if self.verbose {
             println!(
@@ -92,7 +94,7 @@ impl TcpPeer {
         self.stream
             .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
-        let buf = read_n_bytes(&mut self.stream, 68)?;
+        let buf = read_n_bytes_timeout_busy(&mut self.stream, 68, self.timeout)?;
         HandshakeMessage::decode(&buf)
     }
 
@@ -106,6 +108,7 @@ impl TcpPeer {
             bitfield: self.bitfield.clone(),
             port: self.port,
             verbose: self.verbose,
+            timeout: self.timeout,
         })
     }
 }
@@ -123,16 +126,18 @@ impl PeerConnection for TcpPeer {
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect_timeout(&peer, std::time::Duration::from_secs(TCP_CONNECTION_TIMEOUT))
-                .with_context(|| "Error connecting to peer")?,
+            stream: TcpStream::connect_timeout(
+                &peer,
+                std::time::Duration::from_secs(TCP_CONNECTION_TIMEOUT),
+            )
+            .with_context(|| "Error connecting to peer")?,
             meta_info,
             peer_id,
             bitfield: vec![],
             port,
             verbose,
+            timeout: Some(Duration::from_secs(TCP_READ_TIMEOUT)),
         };
-
-        connection.stream.set_read_timeout(Some(Duration::from_secs(TCP_READ_TIMEOUT)))?;
 
         // send handshake
         connection.handshake()?;

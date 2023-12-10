@@ -17,7 +17,7 @@ use crate::{
         message::{HandshakeMessage, PeerMessage, PieceMessage},
         tcp::TcpPeer,
     },
-    util::{read_n_bytes, timestr},
+    util::{timestr, read_n_bytes_timeout_busy},
 };
 
 use super::{Corkboard, Piece, PieceState};
@@ -60,13 +60,14 @@ pub fn seeder(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, verbose: b
                         meta_info,
                         peer_id,
                         port,
-                        bitfield: Vec::new(),
                         verbose,
+                        bitfield: Vec::new(),
+                        timeout: Some(Duration::from_secs(INTERVAL)),
                     };
 
                     // recieve handshake
                     let handshake =
-                        HandshakeMessage::decode(&read_n_bytes(&mut connection.stream, 68)?)?;
+                        HandshakeMessage::decode(&read_n_bytes_timeout_busy(&mut connection.stream, 68, connection.timeout)?)?;
                     log(format!(
                         "{address} peer id: {}",
                         std::str::from_utf8(&handshake.peer_id).context("Peer id not bytes")?

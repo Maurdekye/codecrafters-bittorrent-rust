@@ -3,7 +3,7 @@
 use std::{
     fs,
     net::{Ipv4Addr, SocketAddrV4, TcpStream, SocketAddr},
-    path::PathBuf,
+    path::PathBuf, time::Duration,
 };
 
 use anyhow::Context;
@@ -245,6 +245,7 @@ fn main() -> Result<(), BitTorrentError> {
                 bitfield: Vec::new(),
                 port: handshake_args.port,
                 verbose: false,
+                timeout: Some(Duration::from_secs(60)),
             };
             let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));

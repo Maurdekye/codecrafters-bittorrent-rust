@@ -59,6 +59,17 @@ where
                 .all(|piece| matches!(piece.state, PieceState::Fetched(_)))
             {
                 log(format!("All pieces have been acquired, exiting"));
+                active_connection.as_ref().map(|conn| {
+                    corkboard
+                        .write()
+                        .map(|mut board| {
+                            board
+                                .peers
+                                .entry(*conn.address())
+                                .and_modify(|peer| peer.state = PeerState::Active(false));
+                        })
+                        .unwrap();
+                });
                 return PeerSearchResult::Exit;
             }
 
@@ -269,7 +280,10 @@ where
                             if piece.hash == sha1_hash(&data) {
                                 // if hash matches, store data & keep peer for next loop
                                 if !verbose {
-                                    println!("Downloaded piece {piece_id} from {}", connection.address());
+                                    println!(
+                                        "Downloaded piece {piece_id} from {}",
+                                        connection.address()
+                                    );
                                 }
 
                                 piece.state = PieceState::Fetched(data);
@@ -293,11 +307,19 @@ where
 /// Worker thread: connects to peers and downloads pieces from them
 /// * `corkboard`: shared corkboard for coordinating peer connections and downloaded pieces
 /// * `worker_id`: worker id number
-pub fn worker<T>(corkboard: Arc<RwLock<Corkboard>>, worker_id: usize, verbose: bool) -> Result<(), BitTorrentError>
+pub fn worker<T>(
+    corkboard: Arc<RwLock<Corkboard>>,
+    worker_id: usize,
+    verbose: bool,
+) -> Result<(), BitTorrentError>
 where
     T: PeerConnection,
 {
-    let log = |msg: String| if verbose {println!("[{}][{worker_id}] {msg}", timestr())};
+    let log = |msg: String| {
+        if verbose {
+            println!("[{}][{worker_id}] {msg}", timestr())
+        }
+    };
     // stagger startup to prevent thrashing
     sleep((worker_id * 1000) as u64);
 
@@ -375,7 +397,9 @@ where
                 continue;
             }
             PeerSearchResult::PromptRefetch => continue,
-            PeerSearchResult::Exit => break,
+            PeerSearchResult::Exit => {
+                break;
+            }
         };
 
         // ! mutual exclusion zone 2: search for a piece to download
@@ -399,7 +423,15 @@ where
 
         // ! mutual exclusion zone 3: finalize & store the downloaded piece
         if matches!(
-            finalize_download(&corkboard, result, duration, piece_id, &connection, log, verbose),
+            finalize_download(
+                &corkboard,
+                result,
+                duration,
+                piece_id,
+                &connection,
+                log,
+                verbose
+            ),
             LoopAction::Continue
         ) {
             continue;

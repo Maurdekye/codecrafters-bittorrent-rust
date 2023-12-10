@@ -1,9 +1,14 @@
 use anyhow::Context;
 use chrono::Utc;
 use sha1::{Digest, Sha1};
-use std::{io::Read, net::UdpSocket, str::from_utf8};
+use std::{
+    io::Read,
+    net::{TcpStream, UdpSocket},
+    str::from_utf8,
+    time::{Duration, SystemTime},
+};
 
-use crate::error::BitTorrentError;
+use crate::{bterror, error::BitTorrentError};
 
 /// Convert a hex string to a byte array.
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -11,7 +16,14 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 /// Read n bytes from a TcpStream and return them as a Vec<u8>.
-pub fn read_n_bytes<T: Read>(stream: &mut T, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
+#[allow(unused)]
+pub fn read_n_bytes_timeout(
+    stream: &mut TcpStream,
+    mut n: usize,
+    timeout: Option<Duration>,
+) -> Result<Vec<u8>, BitTorrentError> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(timeout)?;
     let mut bytes = Vec::new();
     while n > 0 {
         let mut buf = vec![0u8; n];
@@ -22,6 +34,41 @@ pub fn read_n_bytes<T: Read>(stream: &mut T, mut n: usize) -> Result<Vec<u8>, Bi
         n -= num_read;
     }
     Ok(bytes)
+}
+
+/// Read n bytes from a TcpStream and return them as a Vec<u8>, busy waiting until the bytes arrive
+pub fn read_n_bytes_timeout_busy(
+    stream: &mut TcpStream,
+    mut n: usize,
+    timeout: Option<Duration>,
+) -> Result<Vec<u8>, BitTorrentError> {
+    let start = SystemTime::now();
+    stream.set_nonblocking(true)?;
+    let mut bytes = Vec::new();
+    while n > 0 {
+        let mut buf = vec![0u8; n];
+        match stream.read(&mut buf) {
+            Ok(num_read) => {
+                bytes.extend(&buf[..num_read]);
+                n -= num_read;
+            }
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+                if timeout.map_or(true, |timeout| {
+                    SystemTime::now().duration_since(start).unwrap() > timeout
+                }) {
+                    return Err(bterror!("Tcp read timeout"));
+                } else {
+                    sleep(50);
+                }
+            }
+            Err(err) => Err(err).context("Error reading tcp stream")?,
+        }
+    }
+    Ok(bytes)
+}
+
+pub fn read_n_bytes(stream: &mut TcpStream, n: usize) -> Result<Vec<u8>, BitTorrentError> {
+    read_n_bytes_timeout_busy(stream, n, None)
 }
 
 pub fn read_datagram(stream: &mut UdpSocket) -> Result<Vec<u8>, BitTorrentError> {
@@ -76,7 +123,6 @@ pub fn querystring_encode(bytes: &[u8]) -> String {
         })
         .collect()
 }
-
 
 pub fn cap_length(msg: String, max_len: usize) -> String {
     if msg.len() > max_len {
