@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    fmt::Display,
     io::Write,
     net::{Shutdown, SocketAddr, TcpStream},
     time::Duration,
@@ -53,55 +54,35 @@ pub struct TcpPeer {
 impl TcpPeer {
     /// Wait for a peer message to arrive from the peer and return it.
     pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
-        if self.verbose {
-            println!("[{}][{}] <...<", timestr(), self.address);
-        }
+        self.log("<...<");
         let buf = read_n_bytes(&mut self.stream, 4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
-        // if self.verbose {println!("[{}][{}] <.<.< {}b", timestr(), self.address, length);}
         let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
         let response = PeerMessage::decode(&buf)?;
-        if self.verbose {
-            println!(
-                "[{}][{}] <<<<< {}",
-                timestr(),
-                self.address,
-                cap_length(format!("{response:?}"), 100)
-            );
-        }
+        self.log(cap_length(format!("<<<<< {response:?}"), 106));
         Ok(response)
     }
 
     /// Send a peer message `message` to the peer.
     pub fn send_peer_message(&mut self, message: PeerMessage) -> Result<(), BitTorrentError> {
-        if self.verbose {
-            println!("[{}][{}] >...> {:?}", timestr(), self.address, message);
-        }
+        self.log(format!(">...> {:?}", message));
         self.stream
             .write(&message.encode()?)
             .with_context(|| "Error sending peer message")?;
-        if self.verbose {
-            println!("[{}][{}] >>>>>", timestr(), self.address);
-        }
+        self.log(">>>>>");
         Ok(())
     }
 
     /// Send a handshake message to the peer.
     pub fn handshake(&mut self) -> Result<HandshakeMessage, BitTorrentError> {
-        if self.verbose {
-            println!("[{}][{}] Sending handshake", timestr(), self.address);
-        }
+        self.log("Sending handshake");
         self.stream
             .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
-        if self.verbose {
-            println!("[{}][{}] Waiting for handshake response", timestr(), self.address);
-        }
+        self.log("Waiting for handshake response");
         let buf = read_n_bytes(&mut self.stream, 68)?;
         let handshake = HandshakeMessage::decode(&buf)?;
-        if self.verbose {
-            println!("[{}][{}] Handshake response: {:?}", timestr(), self.address, handshake);
-        }
+        self.log(format!("Handshake response: {:?}", handshake));
         Ok(handshake)
     }
 
@@ -118,6 +99,12 @@ impl TcpPeer {
             verbose: self.verbose,
             timeout: self.timeout,
         })
+    }
+
+    fn log(&self, message: impl Display) {
+        if self.verbose {
+            println!("[{}][{}] {}", timestr(), self.address, message);
+        }
     }
 }
 
@@ -150,9 +137,7 @@ impl PeerConnection for TcpPeer {
         connection.stream.set_read_timeout(connection.timeout)?;
         connection.stream.set_write_timeout(connection.timeout)?;
 
-        if verbose {
-            println!("[{}][{}] TCP Connection established", timestr(), peer);
-        }
+        connection.log("TCP Connection established");
 
         // send handshake
         connection.handshake()?;
@@ -200,9 +185,7 @@ impl PeerConnection for TcpPeer {
         loop {
             match connection.await_peer_message()? {
                 PeerMessage::Extension(ExtensionMessage::Handshake(handshake)) => {
-                    if connection.verbose {
-                        println!("[{}][{}] {:#?}", timestr(), peer, handshake);
-                    }
+                    connection.log(format!("{:#?}", handshake));
                     break;
                 }
                 _ => (),
