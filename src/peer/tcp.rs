@@ -88,11 +88,21 @@ impl TcpPeer {
 
     /// Send a handshake message to the peer.
     pub fn handshake(&mut self) -> Result<HandshakeMessage, BitTorrentError> {
+        if self.verbose {
+            println!("[{}][{}] Sending handshake", timestr(), self.address);
+        }
         self.stream
             .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
+        if self.verbose {
+            println!("[{}][{}] Waiting for handshake response", timestr(), self.address);
+        }
         let buf = read_n_bytes(&mut self.stream, 68)?;
-        HandshakeMessage::decode(&buf)
+        let handshake = HandshakeMessage::decode(&buf)?;
+        if self.verbose {
+            println!("[{}][{}] Handshake response: {:?}", timestr(), self.address, handshake);
+        }
+        Ok(handshake)
     }
 
     /// Attempt to clone the connection
