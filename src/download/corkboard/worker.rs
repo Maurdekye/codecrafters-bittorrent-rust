@@ -1,8 +1,8 @@
 use std::{
     error::Error,
     net::SocketAddr,
-    sync::{Arc, RwLock},
-    time::SystemTime,
+    sync::{atomic, Arc, RwLock},
+    time::{SystemTime, Duration}, thread,
 };
 
 use crate::{
@@ -11,21 +11,23 @@ use crate::{
     util::{sha1_hash, sleep, timestr},
 };
 
-use super::{Benchmark, Corkboard, PeerState, PieceState};
+use super::{Benchmark, Config, Corkboard, PeerState, Piece, PieceLocation, PieceState};
 
 /// maximum number of time a given peer can be reused before it should be dropped
 const MAX_PEER_USES: usize = 500;
-/// time to wait before next check if no peers are available to take (milliseconds)
-const EMPTY_PEER_WAIT: u64 = 1000;
+/// time to wait before next check if no peers are available to take
+const EMPTY_PEER_WAIT: Duration = Duration::from_secs(1);
 /// conversion factor of bytes per millisecond to mebibites per second
 const MB_S: f64 = 1048.576;
+/// maximum total torrent size before pieces are saved to disk as opposed to being cached in memory (bytes)
+const MAX_MEMORY_SIZE: usize = 52428800; // 50 MB
 /// maximum reconnection attempts to be made to a given peer
 // const MAX_RECONNECT_ATTEMPTS: usize = 5;
 
 enum PeerSearchResult<T: PeerConnection> {
     ConnectNew(SocketAddr),
     Reuse(T),
-    WaitThenRefetch(u64),
+    WaitThenRefetch(Duration),
     PromptRefetch,
     Exit,
 }
@@ -53,23 +55,20 @@ where
         .write()
         .map(|mut board| {
             // If all pieces have been acquired, exit
-            if board
-                .pieces
-                .iter()
-                .all(|piece| matches!(piece.state, PieceState::Fetched(_)))
+            if board.finishing.load(atomic::Ordering::Relaxed)
+                || board
+                    .pieces
+                    .iter()
+                    .all(|piece| matches!(piece.state, PieceState::Fetched(_)))
             {
                 log(format!("All pieces have been acquired, exiting"));
                 active_connection.as_ref().map(|conn| {
-                    corkboard
-                        .write()
-                        .map(|mut board| {
-                            board
-                                .peers
-                                .entry(*conn.address())
-                                .and_modify(|peer| peer.state = PeerState::Active(false));
-                        })
-                        .unwrap();
+                    board
+                        .peers
+                        .entry(*conn.address())
+                        .and_modify(|peer| peer.state = PeerState::Active(false));
                 });
+                board.finishing.store(true, atomic::Ordering::Relaxed);
                 return PeerSearchResult::Exit;
             }
 
@@ -168,13 +167,26 @@ where
     corkboard
         .write()
         .map(|mut board| {
+            // once there are no unfetched pieces left to acquire,
+            // in progress pieces become fair game for other workers to pick up
+            // to speed up the final few piece downloads
+            let piece_valid_predicate = if board
+                .pieces
+                .iter()
+                .all(|piece| !matches!(piece.state, PieceState::Unfetched))
+            {
+                |piece: &Piece| matches!(piece.state, PieceState::Unfetched)
+            } else {
+                |piece: &Piece| !matches!(piece.state, PieceState::Fetched(_))
+            };
+
             // try to find a piece to download
             let next_piece = board
                 .pieces
                 .iter()
                 .enumerate()
                 .zip(connection.bitfield().iter())
-                .find(|((_, piece), has_piece)| piece.state == PieceState::Unfetched && **has_piece)
+                .find(|((_, piece), has_piece)| piece_valid_predicate(piece) && **has_piece)
                 .map(|((piece_id, _), _)| piece_id);
             match next_piece {
                 // if piece was found, mark it as in progress
@@ -214,8 +226,8 @@ fn finalize_download<T, F>(
     piece_id: usize,
     connection: &T,
     log: F,
-    verbose: bool,
-) -> LoopAction
+    config: &Config,
+) -> Result<LoopAction, BitTorrentError>
 where
     T: PeerConnection,
     T::Error: Error,
@@ -245,7 +257,7 @@ where
                     });
 
                     // try again
-                    LoopAction::Continue
+                    Ok(LoopAction::Continue)
                 }
 
                 // download succeeded
@@ -273,21 +285,31 @@ where
                         });
 
                     // check hash
+                    let should_save_to_disk = board.meta_info.length() > MAX_MEMORY_SIZE;
                     board
                         .pieces
                         .get_mut(piece_id)
-                        .map_or(LoopAction::Continue, |piece| {
+                        .map_or(Ok(LoopAction::Continue), |piece| {
                             if piece.hash == sha1_hash(&data) {
                                 // if hash matches, store data & keep peer for next loop
-                                if !verbose {
+                                if !config.verbose {
                                     println!(
                                         "Downloaded piece {piece_id} from {}",
                                         connection.address()
                                     );
                                 }
 
-                                piece.state = PieceState::Fetched(data);
-                                LoopAction::Pass
+                                piece.state = PieceState::Fetched(if should_save_to_disk {
+                                    log(format!("Saving to disk"));
+                                    PieceLocation::save_to_disk(
+                                        config.temp_path.join(format!("piece-{}.dat", piece_id)),
+                                        data,
+                                    )?
+                                } else {
+                                    log(format!("Saving to memory"));
+                                    PieceLocation::Memory(data)
+                                });
+                                Ok(LoopAction::Pass)
                             } else {
                                 log(format!(
                                     "Hash of piece {piece_id} does not match, dropping data"
@@ -295,7 +317,7 @@ where
 
                                 // if hash does not match, mark piece as unfetched
                                 piece.state = PieceState::Unfetched;
-                                LoopAction::Continue
+                                Ok(LoopAction::Continue)
                             }
                         })
                 }
@@ -310,13 +332,13 @@ where
 pub fn worker<T>(
     corkboard: Arc<RwLock<Corkboard>>,
     worker_id: usize,
-    verbose: bool,
+    config: Config,
 ) -> Result<(), BitTorrentError>
 where
     T: PeerConnection,
 {
     let log = |msg: String| {
-        if verbose {
+        if config.verbose {
             println!("[{}][{worker_id}] {msg}", timestr())
         }
     };
@@ -346,7 +368,11 @@ where
                     meta_info.clone(),
                     peer_id.to_string(),
                     port,
-                    verbose,
+                    config.verbose,
+                    corkboard
+                        .read()
+                        .map(|board| board.finishing.clone())
+                        .unwrap(),
                 );
 
                 match connection_result {
@@ -392,8 +418,8 @@ where
                 }
             }
             PeerSearchResult::Reuse(connection) => connection,
-            PeerSearchResult::WaitThenRefetch(millis) => {
-                sleep(millis);
+            PeerSearchResult::WaitThenRefetch(time) => {
+                thread::sleep(time);
                 continue;
             }
             PeerSearchResult::PromptRefetch => continue,
@@ -430,8 +456,8 @@ where
                 piece_id,
                 &connection,
                 log,
-                verbose
-            ),
+                &config
+            )?,
             LoopAction::Continue
         ) {
             continue;

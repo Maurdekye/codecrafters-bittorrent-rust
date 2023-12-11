@@ -1,4 +1,4 @@
-use std::net::{UdpSocket, SocketAddr};
+use std::{net::{UdpSocket, SocketAddr}, sync::{atomic::AtomicBool, Arc}};
 
 use anyhow::Context;
 
@@ -41,7 +41,7 @@ impl UtpPeer {
 impl PeerConnection for UtpPeer {
     type Error = BitTorrentError;
 
-    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16, _verbose: bool) -> Result<Self, Self::Error>
+    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16, _verbose: bool, _killswitch: Arc<AtomicBool>) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {

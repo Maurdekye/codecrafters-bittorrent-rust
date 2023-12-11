@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Mutex};
 use std::thread;
 
@@ -19,10 +20,10 @@ pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
     let mut tracker = Tracker::new(&meta_info)?;
-    let tracker_response = tracker.query(&peer_id, port)?;
+    let tracker_response = tracker.query(&peer_id, port, false)?;
     let peers = tracker_response.peers()?;
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
-    let mut connection = T::new(*peer, meta_info.clone(), peer_id.to_string(), port, false)?;
+    let mut connection = T::new(*peer, meta_info.clone(), peer_id.to_string(), port, false, Arc::new(AtomicBool::new(false)))?;
     connection.download_piece(piece_id)
 }
 
@@ -34,7 +35,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
     let mut tracker = Tracker::new(&meta_info)?;
-    let tracker_response = tracker.query(&peer_id, port)?;
+    let tracker_response = tracker.query(&peer_id, port, false)?;
     let peers = tracker_response.peers()?;
 
     let (worker_send, worker_recieve) = mpsc::channel();
@@ -61,7 +62,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
         let peer_id = peer_id.to_string();
         thread::spawn(move || {
             // initialize connection
-            let mut connection = T::new(peer, meta_info, peer_id, port, false)?;
+            let mut connection = T::new(peer, meta_info, peer_id, port, false, Arc::new(AtomicBool::new(false)))?;
 
             // wait for messages
             loop {

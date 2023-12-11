@@ -1,8 +1,15 @@
-use std::{fs::{self, create_dir_all}, path::PathBuf};
+use std::{
+    fs::{self, create_dir_all},
+    path::PathBuf,
+};
 
 use crate::{
+    bencode::{
+        decode::consume_bencoded_value,
+        encode::{bencode_value, encode_maybe_b64_string},
+    },
     error::BitTorrentError,
-    util::sha1_hash, bencode::{decode::consume_bencoded_value, encode::{bencode_value, encode_maybe_b64_string}},
+    util::sha1_hash,
 };
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -10,7 +17,7 @@ use serde_json::{from_value, to_value};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct MetaInfo {
-    pub announce: String,
+    pub announce: Option<String>,
     #[serde(rename = "announce-list")]
     pub announce_list: Option<Vec<Vec<String>>>,
     pub info: Info,
@@ -63,8 +70,8 @@ impl MetaInfo {
         let content = fs::read(filename).with_context(|| "Error reading file")?;
         let decoded_value = consume_bencoded_value(&mut &content[..])?;
         // dbg!(&decoded_value);
-        let meta_info = from_value(decoded_value)
-            .with_context(|| "Unable to parse meta info dictionary")?;
+        let meta_info =
+            from_value(decoded_value).with_context(|| "Unable to parse meta info dictionary")?;
         Ok(meta_info)
     }
 
@@ -107,11 +114,16 @@ impl MetaInfo {
 
     /// Get a preferred tracker url
     pub fn preferred_tracker(&self) -> String {
-        self.announce_list
-            .as_ref()
-            .and_then(|list| list.iter().flatten().find(|url| url.starts_with("http")))
-            .unwrap_or(&self.announce)
-            .clone()
+        self.announce.clone().unwrap_or_else(||
+            self.announce_list
+                .clone()
+                .unwrap()
+                .first()
+                .unwrap()
+                .first()
+                .unwrap()
+                .clone(),
+        )
     }
 
     /// Save the torrent data to the given path.

@@ -2,12 +2,14 @@
 
 use std::{
     fs,
-    net::{Ipv4Addr, SocketAddrV4, TcpStream, SocketAddr},
-    path::PathBuf, time::Duration,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
+    path::PathBuf,
+    sync::{atomic::AtomicBool, Arc},
+    time::Duration,
 };
 
 use anyhow::Context;
-use clap::{Parser, ArgAction};
+use clap::{ArgAction, Parser};
 use download::download_piece_from_peer;
 use error::BitTorrentError;
 use regex::Regex;
@@ -15,7 +17,10 @@ use tracker::multimodal::Tracker;
 
 use crate::{
     bencode::decode::consume_bencoded_value,
-    download::{corkboard::corkboard_download, download_file},
+    download::{
+        corkboard::{corkboard_download, Config},
+        download_file,
+    },
     info::MetaInfo,
     peer::tcp::TcpPeer,
     util::bytes_to_hex,
@@ -165,7 +170,6 @@ struct DownloadV2Args {
     /// Print verbose logging information
     #[arg(short, long, action = ArgAction::SetTrue)]
     verbose: bool,
-
 }
 
 fn pathbuf_parse(val: &str) -> Result<PathBuf, String> {
@@ -214,7 +218,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Info(info_args) => {
             let meta_info = MetaInfo::from_file(&info_args.torrent_file)?;
             let info_hash = meta_info.info_hash()?;
-            println!("Tracker URL: {}", meta_info.announce);
+            println!("Tracker URL: {}", meta_info.preferred_tracker());
             println!("Length: {}", meta_info.length());
             println!("Info Hash: {}", bytes_to_hex(&info_hash));
             println!(
@@ -229,7 +233,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Peers(peers_args) => {
             let meta_info = MetaInfo::from_file(&peers_args.torrent_file)?;
             let mut tracker = Tracker::new(&meta_info)?;
-            let tracker_info = tracker.query(&peers_args.peer_id, peers_args.port)?;
+            let tracker_info = tracker.query(&peers_args.peer_id, peers_args.port, false)?;
             for sock in tracker_info.peers()? {
                 println!("{}", sock);
             }
@@ -246,6 +250,7 @@ fn main() -> Result<(), BitTorrentError> {
                 port: handshake_args.port,
                 verbose: false,
                 timeout: Some(Duration::from_secs(60)),
+                killswitch: Arc::new(AtomicBool::new(false)),
             };
             let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
@@ -267,11 +272,8 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Download(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = download_file::<TcpPeer>(
-                &meta_info,
-                &download_args.peer_id,
-                download_args.port,
-            )?;
+            let full_file =
+                download_file::<TcpPeer>(&meta_info, &download_args.peer_id, download_args.port)?;
             fs::write(&download_args.output, full_file).with_context(|| "Error writing to disk")?;
             println!(
                 "Downloaded {} to {}.",
@@ -282,10 +284,15 @@ fn main() -> Result<(), BitTorrentError> {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
             let full_file = corkboard_download::<TcpPeer>(
                 meta_info.clone(),
-                &download_args.peer_id,
-                download_args.port,
-                download_args.workers,
-                download_args.verbose,
+                Config {
+                    peer_id: download_args.peer_id,
+                    port: download_args.port,
+                    workers: download_args.workers,
+                    verbose: download_args.verbose,
+                    temp_path: PathBuf::from("tmp/in-progress/")
+                        .join(info_field!(&meta_info.info, name)),
+                    ..Default::default()
+                },
             )?;
             println!("Saving to file");
             meta_info

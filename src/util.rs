@@ -22,18 +22,53 @@ pub fn read_n_bytes_timeout(
     mut n: usize,
     timeout: Option<Duration>,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(timeout)?;
-    let mut bytes = Vec::new();
-    while n > 0 {
-        let mut buf = vec![0u8; n];
-        let num_read = stream
-            .read(&mut buf)
-            .with_context(|| "Error reading tcp stream")?;
-        bytes.extend(&buf[..num_read]);
-        n -= num_read;
+    match timeout {
+        None => read_n_bytes(stream, n),
+        Some(timeout) => {
+            stream.set_nonblocking(false)?;
+            let addr = stream.peer_addr()?;
+            let deadline = SystemTime::now() + timeout;
+            let mut bytes = Vec::new();
+            while n > 0 {
+                let timeout = deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .max(Duration::from_millis(1));
+                stream.set_read_timeout(Some(timeout))?;
+                let mut buf = vec![0u8; n];
+                let num_read = stream
+                    .read(&mut buf)
+                    .with_context(|| "Error reading tcp stream")?;
+                if num_read == 0 {
+                    // println!(
+                    //     "[{}][{}] {} - 0 = {} | {:.2}",
+                    //     timestr(),
+                    //     addr,
+                    //     n,
+                    //     n,
+                    //     deadline
+                    //         .duration_since(SystemTime::now())
+                    //         .map_or(0.0, |timeout| timeout.as_secs_f32())
+                    // );
+                    if SystemTime::now() > deadline {
+                        return Err(bterror!("Tcp read timeout"));
+                    }
+                } else {
+                    // println!(
+                    //     "[{}][{}] {} - {} = {}",
+                    //     timestr(),
+                    //     addr,
+                    //     n,
+                    //     num_read,
+                    //     n - num_read
+                    // );
+                    bytes.extend(&buf[..num_read]);
+                    n -= num_read;
+                }
+            }
+            Ok(bytes)
+        }
     }
-    Ok(bytes)
 }
 
 /// Read n bytes from a TcpStream and return them as a Vec<u8>, busy waiting until the bytes arrive
@@ -45,16 +80,30 @@ pub fn read_n_bytes_timeout_busy(
 ) -> Result<Vec<u8>, BitTorrentError> {
     let start = SystemTime::now();
     stream.set_nonblocking(true)?;
+    let addr = stream.peer_addr()?;
     let mut bytes = Vec::new();
     while n > 0 {
         let mut buf = vec![0u8; n];
-        match stream.read(&mut buf) {
-            Ok(num_read) => {
-                bytes.extend(&buf[..num_read]);
-                n -= num_read;
-            }
-            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => {
+        let num_read = match stream.read(&mut buf) {
+            Ok(num_read) => num_read,
+            Err(err) if matches!(err.kind(), std::io::ErrorKind::WouldBlock) => 0,
+            Err(err) => Err(err).context("Error reading tcp stream")?,
+        };
+        match num_read {
+            0 => {
                 if timeout.map_or(true, |timeout| {
+                    // println!(
+                    //     "[{}][{}] {} - 0 = {} | {:.2}",
+                    //     timestr(),
+                    //     addr,
+                    //     n,
+                    //     n,
+                    //     timeout.as_secs_f32()
+                    //         - SystemTime::now()
+                    //             .duration_since(start)
+                    //             .unwrap()
+                    //             .as_secs_f32()
+                    // );
                     SystemTime::now().duration_since(start).unwrap() > timeout
                 }) {
                     return Err(bterror!("Tcp read timeout"));
@@ -62,12 +111,24 @@ pub fn read_n_bytes_timeout_busy(
                     sleep(50);
                 }
             }
-            Err(err) => Err(err).context("Error reading tcp stream")?,
+            _ => {
+                // println!(
+                //     "[{}][{}] {} - {} = {}",
+                //     timestr(),
+                //     addr,
+                //     n,
+                //     num_read,
+                //     n - num_read
+                // );
+                bytes.extend(&buf[..num_read]);
+                n -= num_read;
+            }
         }
     }
     Ok(bytes)
 }
 
+#[allow(unused)]
 pub fn read_n_bytes(stream: &mut TcpStream, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
     let mut bytes = Vec::new();
     while n > 0 {

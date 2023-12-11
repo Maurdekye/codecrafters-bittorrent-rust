@@ -1,5 +1,7 @@
+use std::array::TryFromSliceError;
 use std::error::Error;
 use std::fmt::Display;
+use std::sync::PoisonError;
 
 
 #[macro_export]
@@ -51,5 +53,18 @@ impl From<serde_json::Error> for BitTorrentError {
         BitTorrentError::new(value.to_string())
     }
 }
+
+impl<T> From<PoisonError<T>> for BitTorrentError {
+    fn from(value: PoisonError<T>) -> Self {
+        BitTorrentError::new(value.to_string())
+    }
+}
+
+impl From<TryFromSliceError> for BitTorrentError {
+    fn from(value: TryFromSliceError) -> Self {
+        BitTorrentError::new(value.to_string())
+    }
+}
+
 
 impl Error for BitTorrentError {}

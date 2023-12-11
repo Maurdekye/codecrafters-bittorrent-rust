@@ -18,22 +18,22 @@ use crate::{
         message::{HandshakeMessage, PeerMessage, PieceMessage},
         tcp::TcpPeer,
     },
-    util::{read_n_bytes, timestr},
+    util::timestr,
 };
 
-use super::{Corkboard, Piece, PieceState};
+use super::{Corkboard, Piece, PieceState, Config};
 
-/// time in between non-blocking tcp listener requests (seconds)
-const INTERVAL: u64 = 1;
+/// time in between non-blocking tcp listener requests
+const INTERVAL: Duration = Duration::from_secs(1);
 
 /// Seeder thread: allows incoming peer connections and feeds torrent data back to them
 pub fn seeder(
     corkboard: Arc<RwLock<Corkboard>>,
     alarm: Receiver<()>,
-    verbose: bool,
+    config: Config,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
-        if verbose {
+        if config.verbose {
             println!("[{}][S] {msg}", timestr())
         }
     };
@@ -57,9 +57,15 @@ pub fn seeder(
                 log(format!("New connection from {address}"));
                 thread::spawn(move || {
                     let log = |msg: String| println!("[{}][{}] {msg}", timestr(), address);
-                    let (meta_info, peer_id) = connection_board
+                    let (meta_info, peer_id, killswitch) = connection_board
                         .read()
-                        .map(|board| (board.meta_info.clone(), board.peer_id.clone()))
+                        .map(|board| {
+                            (
+                                board.meta_info.clone(),
+                                board.peer_id.clone(),
+                                board.finishing.clone(),
+                            )
+                        })
                         .unwrap();
 
                     // set up connection
@@ -69,14 +75,14 @@ pub fn seeder(
                         meta_info,
                         peer_id,
                         port,
-                        verbose,
+                        verbose: config.verbose,
                         bitfield: Vec::new(),
-                        timeout: Some(Duration::from_secs(INTERVAL)),
+                        timeout: Some(INTERVAL),
+                        killswitch,
                     };
 
                     // recieve handshake
-                    let handshake =
-                        HandshakeMessage::decode(&read_n_bytes(&mut connection.stream, 68)?)?;
+                    let handshake = HandshakeMessage::decode(&connection.read_n_bytes(68)?)?;
                     log(format!(
                         "{address} peer id: {}",
                         std::str::from_utf8(&handshake.peer_id).context("Peer id not bytes")?
@@ -125,9 +131,9 @@ pub fn seeder(
                                     .map(|board| {
                                         let piece_data = match board.pieces.get(piece_id as usize) {
                                             Some(Piece {
-                                                state: PieceState::Fetched(data),
+                                                state: PieceState::Fetched(location),
                                                 ..
-                                            }) => data,
+                                            }) => location.clone().load()?,
                                             _ => {
                                                 return Err(bterror!(
                                                     "Piece {piece_id} is not fetched"
@@ -159,7 +165,7 @@ pub fn seeder(
             Err(err) => match err.kind() {
                 io::ErrorKind::WouldBlock => {
                     if matches!(
-                        alarm.recv_timeout(Duration::from_secs(INTERVAL)),
+                        alarm.recv_timeout(INTERVAL),
                         Err(RecvTimeoutError::Disconnected) | Ok(_)
                     ) {
                         break;

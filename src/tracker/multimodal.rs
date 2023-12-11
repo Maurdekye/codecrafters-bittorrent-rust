@@ -1,4 +1,9 @@
-use std::{net::UdpSocket, time::{SystemTime, Duration}};
+use std::{
+    collections::VecDeque,
+    iter::once,
+    net::UdpSocket,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::Context;
 
@@ -14,8 +19,7 @@ use crate::{
     util::{querystring_encode, read_datagram},
 };
 
-
-const TRACKER_QUERY_TIMEOUT: u64 = 60;
+const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
@@ -24,35 +28,45 @@ lazy_static! {
 pub struct Tracker<'a> {
     pub meta_info: &'a MetaInfo,
     connection: TrackerConnection,
+    pub servers: VecDeque<String>,
 }
 
 impl Tracker<'_> {
     pub fn new(meta_info: &MetaInfo) -> Result<Tracker, BitTorrentError> {
-        let tracker_url = meta_info.announce.clone();
+        let trackers = once(meta_info.announce.clone())
+            .chain(
+                meta_info
+                    .announce_list
+                    .clone()
+                    .unwrap_or(vec![])
+                    .into_iter()
+                    .map(|l| l.first().map(Clone::clone)),
+            )
+            .filter_map(|x| x)
+            .collect::<VecDeque<_>>();
         Ok(Tracker {
             meta_info: meta_info,
-            connection: if tracker_url.starts_with("http") {
-                TrackerConnection::Http(tracker_url)
-            } else if tracker_url.starts_with("udp") {
-                match UDP_TRACKER_RE
-                    .captures(&tracker_url)
-                    .and_then(|captures| captures.get(1))
-                {
-                    Some(group) => TrackerConnection::Udp(UdpTrackerConnection::new(group.into())?),
-                    None => return Err(bterror!("Invalid tracker url: {}", tracker_url)),
-                }
-            } else {
-                return Err(bterror!("Unrecognized tracker protocol: {}", tracker_url));
-            },
+            connection: TrackerConnection::new(
+                trackers.get(0).expect("Tracker has no urls").clone(),
+            )?,
+            servers: trackers,
         })
+    }
+
+    fn cycle_trackers(&mut self) -> Result<(), BitTorrentError> {
+        self.servers.rotate_right(1);
+        self.connection =
+            TrackerConnection::new(self.servers.get(0).expect("Tracker has no urls").clone())?;
+        Ok(())
     }
 
     pub fn query(
         &mut self,
         peer_id: &str,
         port: u16,
+        _verbose: bool,
     ) -> Result<SuccessfulTrackerResponse, BitTorrentError> {
-        match &mut self.connection {
+        match (|| match &mut self.connection {
             TrackerConnection::Http(announce) => {
                 let client = reqwest::blocking::Client::new();
 
@@ -77,6 +91,7 @@ impl Tracker<'_> {
                         .collect::<Vec<_>>()
                         .join("&")
                     ))
+                    .timeout(TRACKER_QUERY_TIMEOUT)
                     .send()
                     .with_context(|| "Error making request to tracker url")?
                     .bytes()
@@ -103,15 +118,41 @@ impl Tracker<'_> {
                 }
                 udp_connection.annouce(&self.meta_info, peer_id, port)
             }
+        })() {
+            Err(e) => {
+                self.cycle_trackers()?;
+                Err(e)
+            }
+            x => x,
         }
     }
 }
 
+#[derive(Debug)]
 enum TrackerConnection {
     Http(String),
     Udp(UdpTrackerConnection),
 }
 
+impl TrackerConnection {
+    fn new(url: String) -> Result<Self, BitTorrentError> {
+        Ok(if url.starts_with("http") {
+            Self::Http(url)
+        } else if url.starts_with("udp") {
+            match UDP_TRACKER_RE
+                .captures(&url)
+                .and_then(|captures| captures.get(1))
+            {
+                Some(group) => Self::Udp(UdpTrackerConnection::new(group.into())?),
+                None => return Err(bterror!("Invalid tracker url: {}", url)),
+            }
+        } else {
+            return Err(bterror!("Unrecognized tracker protocol: {}", url));
+        })
+    }
+}
+
+#[derive(Debug)]
 struct UdpTrackerConnection {
     connection: UdpSocket,
     last_connection: Option<SystemTime>,
@@ -126,7 +167,8 @@ impl UdpTrackerConnection {
                 Ok(connection)
             })
             .with_context(|| "Error connecting to tracker")?;
-        connection.set_read_timeout(Some(Duration::from_secs(TRACKER_QUERY_TIMEOUT)))?;
+        connection.set_read_timeout(Some(TRACKER_QUERY_TIMEOUT))?;
+        connection.set_write_timeout(Some(TRACKER_QUERY_TIMEOUT))?;
         Ok(UdpTrackerConnection {
             connection: connection,
             last_connection: None,

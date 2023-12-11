@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{mpsc::channel, Arc, RwLock},
-    thread,
+    sync::{atomic::AtomicBool, mpsc::channel, Arc, RwLock},
+    thread, path::{Path, PathBuf}, fs::create_dir_all,
 };
 
 use crate::{bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection, util::timestr};
@@ -18,6 +18,7 @@ pub struct Corkboard {
     pub port: u16,
     pub pieces: Vec<Piece>,
     pub peers: HashMap<SocketAddr, Peer>,
+    pub finishing: Arc<AtomicBool>,
 }
 
 impl Corkboard {
@@ -25,6 +26,7 @@ impl Corkboard {
         Ok(Self {
             pieces: meta_info.pieces()?.into_iter().map(Piece::new).collect(),
             peers: HashMap::new(),
+            finishing: Arc::new(AtomicBool::new(false)),
             meta_info,
             peer_id,
             port,
@@ -50,7 +52,28 @@ impl Piece {
 pub enum PieceState {
     Unfetched,
     InProgress,
-    Fetched(Vec<u8>),
+    Fetched(PieceLocation),
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub enum PieceLocation {
+    Memory(Vec<u8>),
+    Disk(PathBuf),
+}
+
+impl PieceLocation {
+    fn load(self) -> Result<Vec<u8>, BitTorrentError> {
+        match self {
+            Self::Memory(data) => Ok(data),
+            Self::Disk(path) => Ok(std::fs::read(path)?),
+        }
+    }
+
+    fn save_to_disk(path: PathBuf, data: Vec<u8>) -> Result<Self, BitTorrentError> {
+        create_dir_all(path.parent().unwrap())?;
+        std::fs::write(path.clone(), data)?;
+        Ok(Self::Disk(path))
+    }
 }
 
 #[derive(Clone)]
@@ -105,6 +128,27 @@ pub struct Benchmark {
     duration_millis: usize,
 }
 
+#[derive(Clone)]
+pub struct Config {
+    pub workers: usize,
+    pub verbose: bool,
+    pub temp_path: PathBuf,
+    pub peer_id: String,
+    pub port: u16,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            workers: 4,
+            verbose: false,
+            temp_path: Path::new("tmp/in-progress/").to_path_buf(),
+            peer_id: "00112233445566778899".to_string(),
+            port: 6881,
+        }
+    }
+}
+
 /// ## Corkboard Download
 ///
 /// Download the torrent using a self-coined 'Corkboard' synchronization strategy.
@@ -116,22 +160,23 @@ pub struct Benchmark {
 /// successful download to the board.
 pub fn corkboard_download<T: PeerConnection>(
     meta_info: MetaInfo,
-    peer_id: &str,
-    port: u16,
-    workers: usize,
-    verbose: bool,
+    config: Config,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let log = |msg: String| if verbose {println!("[{}] {msg}", timestr())};
+    let log = |msg: String| {
+        if config.verbose {
+            println!("[{}] {msg}", timestr())
+        }
+    };
 
     // create corkboard
     log(format!("Initializing Corkboard"));
     let corkboard: Arc<RwLock<Corkboard>> = Arc::new(RwLock::new(Corkboard::new(
         meta_info,
-        peer_id.to_string(),
-        port,
+        config.peer_id.to_string(),
+        config.port,
     )?));
 
-    if verbose {
+    if config.verbose {
         println!("Starting download");
     } else {
         log(format!(
@@ -142,23 +187,21 @@ pub fn corkboard_download<T: PeerConnection>(
 
     // spawn subtasks
     log(format!("Starting subtasks"));
-    let tasks = [
-        monitor::monitor, 
-        watchdog::watchdog, 
-        seeder::seeder
-        ].map(|task| {
+    let tasks = [monitor::monitor, watchdog::watchdog, seeder::seeder].map(|task| {
         let corkboard = corkboard.clone();
         let (notify, alarm) = channel();
-        let handle = thread::spawn(move || task(corkboard, alarm, verbose));
+        let config = config.clone();
+        let handle = thread::spawn(move || task(corkboard, alarm, config));
         (handle, notify)
     });
 
     // start workers
     log(format!("Starting workers"));
-    let workers = (0..workers)
+    let workers = (0..config.workers)
         .map(|worker_id| {
             let corkboard = corkboard.clone();
-            thread::spawn(move || worker::worker::<T>(corkboard, worker_id, verbose))
+            let config = config.clone();
+            thread::spawn(move || worker::worker::<T>(corkboard, worker_id, config))
         })
         .collect::<Vec<_>>();
 
@@ -168,7 +211,7 @@ pub fn corkboard_download<T: PeerConnection>(
         worker.join().unwrap()?;
     }
 
-    if !verbose {
+    if !config.verbose {
         println!("Finished downloading");
     }
 
@@ -183,7 +226,6 @@ pub fn corkboard_download<T: PeerConnection>(
     }
 
     // coallate data
-    // this is really memory inefficient... need to figure out a better way to save and collect data
     log(format!("Coallating data"));
     let data = corkboard
         .read()
@@ -193,13 +235,12 @@ pub fn corkboard_download<T: PeerConnection>(
                     .pieces
                     .iter()
                     .map(|piece| match &piece.state {
-                        PieceState::Fetched(data) => Ok(data),
+                        PieceState::Fetched(data_location) => data_location.clone().load(),
                         _ => Err(bterror!("Unfetched piece data remains!")),
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .flatten()
-                    .copied()
                     .collect::<Vec<u8>>(),
             )
         })

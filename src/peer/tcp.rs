@@ -1,9 +1,10 @@
 use std::{
     collections::VecDeque,
     fmt::Display,
-    io::Write,
+    io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
-    time::Duration,
+    sync::{atomic::{AtomicBool, self}, Arc},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::Context;
@@ -16,13 +17,13 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     info_field,
-    util::{bytes_to_hex, cap_length, read_n_bytes, sha1_hash, timestr},
+    util::{bytes_to_hex, cap_length, sha1_hash, timestr},
 };
 
 use super::{
     message::{
         ExtensionHandshake, ExtensionMessage, HandshakeMessage, PeerMessage, PieceMessage,
-        RequestMessage,
+        RequestMessage, EncodeDecode,
     },
     PeerConnection,
 };
@@ -31,10 +32,10 @@ use super::{
 const CHUNK_SIZE: u32 = 16384;
 /// number of requests that can be in flight at once
 const IN_FLIGHT: usize = 4;
-/// connection timeout when attempting to connect to a peer's tcp socket (seconds)
-const TCP_CONNECTION_TIMEOUT: u64 = 1;
-/// timeout while waiting for a peer message to arrive (seconds)
-const TCP_READWRITE_TIMEOUT: u64 = 180;
+/// connection timeout when attempting to connect to a peer's tcp socket
+const TCP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+/// timeout while waiting for a peer message to arrive
+const TCP_READWRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// maximum number of allowed rejections before the peer is disconnected
 const MAX_REJECTIONS: usize = 64;
 
@@ -49,15 +50,16 @@ pub struct TcpPeer {
     pub port: u16,
     pub verbose: bool,
     pub timeout: Option<Duration>,
+    pub killswitch: Arc<AtomicBool>,
 }
 
 impl TcpPeer {
     /// Wait for a peer message to arrive from the peer and return it.
     pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
         self.log("<...<");
-        let buf = read_n_bytes(&mut self.stream, 4)?;
+        let buf = self.read_n_bytes(4)?;
         let length = u32::from_be_bytes(buf.try_into().expect("Length buffer was not 4 bytes"));
-        let buf: Vec<u8> = read_n_bytes(&mut self.stream, length as usize)?;
+        let buf: Vec<u8> = self.read_n_bytes(length as usize)?;
         let response = PeerMessage::decode(&buf)?;
         self.log(cap_length(format!("<<<<< {response:?}"), 106));
         Ok(response)
@@ -80,7 +82,7 @@ impl TcpPeer {
             .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
         self.log("Waiting for handshake response");
-        let buf = read_n_bytes(&mut self.stream, 68)?;
+        let buf = self.read_n_bytes(68)?;
         let handshake = HandshakeMessage::decode(&buf)?;
         self.log(format!("Handshake response: {:?}", handshake));
         Ok(handshake)
@@ -98,6 +100,7 @@ impl TcpPeer {
             port: self.port,
             verbose: self.verbose,
             timeout: self.timeout,
+            killswitch: self.killswitch.clone(),
         })
     }
 
@@ -105,6 +108,37 @@ impl TcpPeer {
         if self.verbose {
             println!("[{}][{}] {}", timestr(), self.address, message);
         }
+    }
+
+    pub fn read_n_bytes(&mut self, mut n: usize) -> Result<Vec<u8>, BitTorrentError> {
+        let deadline = self.timeout.map(|timeout| SystemTime::now() + timeout);
+        let mut bytes = Vec::new();
+        while n > 0 {
+            if self.killswitch.load(atomic::Ordering::Relaxed) {
+                return Err(bterror!("Peer killed"));
+            }
+            let timeout = deadline.map(|deadline| {
+                deadline
+                    .duration_since(SystemTime::now())
+                    .unwrap_or_default()
+                    .max(Duration::from_millis(1))
+            });
+            self.stream.set_read_timeout(timeout)?;
+            let mut buf = vec![0u8; n];
+            let num_read = self
+                .stream
+                .read(&mut buf)
+                .with_context(|| "Error reading tcp stream")?;
+            if num_read == 0 {
+                if deadline.map_or(false, |deadline| SystemTime::now() > deadline) {
+                    return Err(bterror!("Tcp read timeout"));
+                }
+            } else {
+                bytes.extend(&buf[..num_read]);
+                n -= num_read;
+            }
+        }
+        Ok(bytes)
     }
 }
 
@@ -118,12 +152,13 @@ impl PeerConnection for TcpPeer {
         peer_id: String,
         port: u16,
         verbose: bool,
+        killswitch: Arc<AtomicBool>,
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
             stream: TcpStream::connect_timeout(
                 &peer,
-                std::time::Duration::from_secs(TCP_CONNECTION_TIMEOUT),
+                TCP_CONNECTION_TIMEOUT,
             )
             .with_context(|| "Error connecting to peer")?,
             meta_info,
@@ -131,7 +166,8 @@ impl PeerConnection for TcpPeer {
             bitfield: vec![],
             port,
             verbose,
-            timeout: Some(Duration::from_secs(TCP_READWRITE_TIMEOUT)),
+            timeout: Some(TCP_READWRITE_TIMEOUT),
+            killswitch,
         };
 
         connection.stream.set_read_timeout(connection.timeout)?;
