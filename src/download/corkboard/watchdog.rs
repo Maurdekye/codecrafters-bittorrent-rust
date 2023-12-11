@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{error::BitTorrentError, tracker::multimodal::Tracker, util::timestr};
+use crate::{error::BitTorrentError, util::timestr, tracker::multimodal::Tracker};
 
 use super::{Config, Corkboard, Peer, PeerState};
 
@@ -19,6 +19,7 @@ const MAX_INTERVAL: Duration = Duration::from_secs(2 * 60);
 pub fn watchdog(
     corkboard: Arc<RwLock<Corkboard>>,
     alarm: Receiver<()>,
+    mut tracker: Tracker,
     config: Config,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
@@ -28,23 +29,10 @@ pub fn watchdog(
     };
 
     log(format!("Watchdog init"));
-
-    // fetch board to get a copy of meta_info
-    let (meta_info, peer_id, port) = corkboard
-        .read()
-        .map(|board| (board.meta_info.clone(), board.peer_id.clone(), board.port))
-        .unwrap();
-
-    log(format!("Initializing tracker connection"));
-    let mut tracker = Tracker::new(&meta_info).expect("Tracker unable to connect!");
     loop {
         // update peer information
-
-        log(format!("Querying tracker: {:?}", tracker.servers.front()));
-        let interval = match tracker
-            .query(&peer_id, port, true)
-            .and_then(|response| Ok((response.peers()?, response.interval)))
-        {
+        log(format!("Querying peer source"));
+        let interval = match tracker.query() {
             Ok((mut peers, interval)) => {
                 println!("{}", format!("Found {} peers", peers.len()));
                 corkboard
@@ -77,7 +65,7 @@ pub fn watchdog(
                             .extend(peers.into_iter().map(|address| (address, Peer::new())));
                     })
                     .unwrap();
-                Duration::from_secs(interval as u64).min(MAX_INTERVAL)
+                Duration::from_secs(interval).min(MAX_INTERVAL)
             }
             Err(err) => {
                 println!("{}", format!("Error querying tracker: {}", err));

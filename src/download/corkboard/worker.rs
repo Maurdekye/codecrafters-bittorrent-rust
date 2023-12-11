@@ -8,7 +8,7 @@ use std::{
 use crate::{
     error::BitTorrentError,
     peer::PeerConnection,
-    util::{sha1_hash, sleep, timestr},
+    util::{sha1_hash, sleep, timestr}, info::MetaInfo, torrent_source::TorrentSource,
 };
 
 use super::{Benchmark, Config, Corkboard, PeerState, Piece, PieceLocation, PieceState};
@@ -332,6 +332,7 @@ where
 pub fn worker<T>(
     corkboard: Arc<RwLock<Corkboard>>,
     worker_id: usize,
+    meta_info: MetaInfo,
     config: Config,
 ) -> Result<(), BitTorrentError>
 where
@@ -346,14 +347,9 @@ where
     sleep((worker_id * 1000) as u64);
 
     log(format!("Worker init"));
-    let (meta_info, peer_id) = corkboard
-        .read()
-        .map(|board| (board.meta_info.clone(), board.peer_id.clone()))
-        .unwrap();
 
     let mut active_connection: Option<T> = None;
     let mut uses = 0;
-    let port = corkboard.read().unwrap().port;
 
     loop {
         // ! mutual exclusion zone 1: search for a peer to use / connect to
@@ -365,9 +361,9 @@ where
                 // try to connect to the new peer
                 let connection_result = T::new(
                     address.clone(),
-                    meta_info.clone(),
-                    peer_id.to_string(),
-                    port,
+                    TorrentSource::File(meta_info.clone()),
+                    config.peer_id.clone(),
+                    config.port,
                     config.verbose,
                     corkboard
                         .read()

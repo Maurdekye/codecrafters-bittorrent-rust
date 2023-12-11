@@ -1,14 +1,20 @@
 use anyhow::Context;
 use chrono::Utc;
+use lazy_static::lazy_static;
+use regex::Regex;
 use sha1::{Digest, Sha1};
 use std::{
     io::Read,
-    net::{TcpStream, UdpSocket},
+    net::{TcpStream, UdpSocket, SocketAddrV4, Ipv4Addr, SocketAddr},
     str::from_utf8,
     time::{Duration, SystemTime},
 };
 
 use crate::{bterror, error::BitTorrentError};
+
+lazy_static! {
+    pub static ref SOCKADDR_V4: Regex = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
+}
 
 /// Convert a hex string to a byte array.
 pub fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -200,5 +206,33 @@ pub fn cap_length(msg: String, max_len: usize) -> String {
         format!("{}...", &msg[..max_len - 3])
     } else {
         msg.to_string()
+    }
+}
+
+pub fn parse_socket_addr(val: &str) -> Result<SocketAddr, BitTorrentError> {
+    // todo! support for ipv6
+    match SOCKADDR_V4.captures(val) {
+        None => Err(bterror!("Invalid ip:port format specified")),
+        Some(captures) => {
+            let ip_parts = (1..=4)
+                .map(|i| {
+                    captures
+                        .get(i)
+                        .unwrap()
+                        .as_str()
+                        .parse()
+                        .map_err(|_| bterror!("IP part {} not in the range 0-255", i))
+                })
+                .collect::<Result<Vec<u8>, _>>()?;
+            Ok(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::new(ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]),
+                captures
+                    .get(5)
+                    .unwrap()
+                    .as_str()
+                    .parse()
+                    .map_err(|_| bterror!("Port not in the range 0-65535"))?, 
+            )))
+        }
     }
 }

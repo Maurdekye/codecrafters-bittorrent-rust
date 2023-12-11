@@ -1,7 +1,5 @@
 use std::{
-    collections::VecDeque,
-    iter::once,
-    net::UdpSocket,
+    net::{SocketAddr, UdpSocket},
     time::{Duration, SystemTime},
 };
 
@@ -14,10 +12,12 @@ use crate::{
     bencode::decode::{consume_bencoded_value, decode_maybe_b64_string},
     bterror,
     error::BitTorrentError,
-    info::MetaInfo,
+    torrent_source::TorrentSource,
     tracker::{SuccessfulTrackerResponse, TrackerResponse},
     util::{querystring_encode, read_datagram},
 };
+
+use super::dht::Dht;
 
 const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -25,48 +25,47 @@ lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
 }
 
-pub struct Tracker<'a> {
-    pub meta_info: &'a MetaInfo,
-    connection: TrackerConnection,
-    pub servers: VecDeque<String>,
+pub struct Tracker {
+    pub torrent_source: TorrentSource,
+    active_connection: TrackerConnection,
+    pub trackers: Vec<String>,
+    pub peer_id: String,
+    pub port: u16,
 }
 
-impl Tracker<'_> {
-    pub fn new(meta_info: &MetaInfo) -> Result<Tracker, BitTorrentError> {
-        let trackers = once(meta_info.announce.clone())
-            .chain(
-                meta_info
-                    .announce_list
-                    .clone()
-                    .unwrap_or(vec![])
-                    .into_iter()
-                    .map(|l| l.first().map(Clone::clone)),
-            )
-            .filter_map(|x| x)
-            .collect::<VecDeque<_>>();
+impl Tracker {
+    pub fn new(
+        torrent_source: TorrentSource,
+        peer_id: String,
+        port: u16,
+    ) -> Result<Tracker, BitTorrentError> {
+        let mut trackers = torrent_source.trackers();
         Ok(Tracker {
-            meta_info: meta_info,
-            connection: TrackerConnection::new(
-                trackers.get(0).expect("Tracker has no urls").clone(),
-            )?,
-            servers: trackers,
+            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source)?,
+            trackers: trackers,
+            torrent_source,
+            peer_id,
+            port,
         })
     }
 
-    fn cycle_trackers(&mut self) -> Result<(), BitTorrentError> {
-        self.servers.rotate_right(1);
-        self.connection =
-            TrackerConnection::new(self.servers.get(0).expect("Tracker has no urls").clone())?;
+    fn _next_tracker(
+        trackers: &mut Vec<String>,
+        torrent_source: &TorrentSource,
+    ) -> Result<TrackerConnection, BitTorrentError> {
+        Ok(match trackers.pop() {
+            Some(url) => TrackerConnection::new(url)?,
+            None => TrackerConnection::Dht(Dht::new(torrent_source.clone())),
+        })
+    }
+
+    fn next_tracker(&mut self) -> Result<(), BitTorrentError> {
+        self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source)?;
         Ok(())
     }
 
-    pub fn query(
-        &mut self,
-        peer_id: &str,
-        port: u16,
-        _verbose: bool,
-    ) -> Result<SuccessfulTrackerResponse, BitTorrentError> {
-        match (|| match &mut self.connection {
+    pub fn query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
+        match (|| match &mut self.active_connection {
             TrackerConnection::Http(announce) => {
                 let client = reqwest::blocking::Client::new();
 
@@ -77,13 +76,22 @@ impl Tracker<'_> {
                         [
                             (
                                 "info_hash",
-                                querystring_encode(&self.meta_info.info_hash()?)
+                                querystring_encode(&self.torrent_source.hash()?)
                             ),
-                            ("peer_id", peer_id.to_string()),
-                            ("port", format!("{}", port)),
+                            ("peer_id", self.peer_id.to_string()),
+                            ("port", format!("{}", self.port)),
                             ("uploaded", "0".to_string()),
                             ("downloaded", "0".to_string()),
-                            ("left", format!("{}", self.meta_info.length())),
+                            (
+                                "left",
+                                format!(
+                                    "{}",
+                                    match &self.torrent_source {
+                                        TorrentSource::File(meta_info) => meta_info.length(),
+                                        _ => 0,
+                                    }
+                                )
+                            ),
                             ("compact", "1".to_string()),
                         ]
                         .into_iter()
@@ -103,7 +111,9 @@ impl Tracker<'_> {
                         .with_context(|| "Error deserializing tracker response")?;
 
                 match tracker_response {
-                    TrackerResponse::Success(tracker_info) => Ok(tracker_info),
+                    TrackerResponse::Success(tracker_info) => {
+                        Ok((tracker_info.peers()?, tracker_info.interval))
+                    }
                     TrackerResponse::Failure(tracker_info) => Err(bterror!(
                         "Tracker query failure: {}",
                         tracker_info.failure_reason
@@ -116,11 +126,12 @@ impl Tracker<'_> {
                 }) {
                     udp_connection.connect()?;
                 }
-                udp_connection.annouce(&self.meta_info, peer_id, port)
+                udp_connection.annouce(&self.torrent_source, &self.peer_id, self.port)
             }
+            TrackerConnection::Dht(dht) => Ok((dht.next().ok_or(bterror!("No dht peers"))?, 30)),
         })() {
             Err(e) => {
-                self.cycle_trackers()?;
+                self.next_tracker()?;
                 Err(e)
             }
             x => x,
@@ -132,6 +143,7 @@ impl Tracker<'_> {
 enum TrackerConnection {
     Http(String),
     Udp(UdpTrackerConnection),
+    Dht(Dht),
 }
 
 impl TrackerConnection {
@@ -210,10 +222,10 @@ impl UdpTrackerConnection {
 
     fn annouce(
         &mut self,
-        meta_info: &MetaInfo,
+        torrent_source: &TorrentSource,
         peer_id: &str,
         port: u16,
-    ) -> Result<SuccessfulTrackerResponse, BitTorrentError> {
+    ) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
         let transaction_id: u32 = rand::random();
         let key: u32 = rand::random();
 
@@ -227,7 +239,7 @@ impl UdpTrackerConnection {
             .chain(connection_id.to_be_bytes())
             .chain(1_u32.to_be_bytes()) // action (1: announce)
             .chain(transaction_id.to_be_bytes())
-            .chain(meta_info.info_hash()?)
+            .chain(torrent_source.hash()?)
             .chain(peer_id.bytes())
             .chain(0_u64.to_be_bytes()) // downloaded
             .chain(0_u64.to_be_bytes()) // left
@@ -251,12 +263,13 @@ impl UdpTrackerConnection {
             return Err(bterror!("Invalid transaction id in announce response"));
         }
 
-        let interval = u32::from_be_bytes(response_bytes[8..12].try_into().unwrap()) as usize;
+        let interval = u32::from_be_bytes(response_bytes[8..12].try_into().unwrap()) as u64;
         // let leechers = u32::from_be_bytes(response_bytes[12..16].try_into().unwrap());
         // let seeders = u32::from_be_bytes(response_bytes[16..20].try_into().unwrap());
 
         let peers = decode_maybe_b64_string(&response_bytes[20..]);
+        let tracker_response = SuccessfulTrackerResponse { peers, interval };
 
-        Ok(SuccessfulTrackerResponse { interval, peers })
+        Ok((tracker_response.peers()?, interval))
     }
 }

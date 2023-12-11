@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream},
+    net::{SocketAddr, TcpStream},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
@@ -12,8 +12,8 @@ use anyhow::Context;
 use clap::{ArgAction, Parser};
 use download::download_piece_from_peer;
 use error::BitTorrentError;
-use regex::Regex;
 use tracker::multimodal::Tracker;
+use util::parse_socket_addr;
 
 use crate::{
     bencode::decode::consume_bencoded_value,
@@ -23,15 +23,17 @@ use crate::{
     },
     info::MetaInfo,
     peer::tcp::TcpPeer,
-    util::bytes_to_hex,
+    util::bytes_to_hex, torrent_source::TorrentSource,
 };
 
 mod bencode;
 mod download;
 mod error;
 mod info;
+mod magnet;
 mod multithread;
 mod peer;
+mod torrent_source;
 mod tracker;
 mod util;
 
@@ -73,7 +75,7 @@ struct InfoArgs {
 struct PeersArgs {
     /// File with torrent information
     #[arg(required = true)]
-    torrent_file: String,
+    torrent_source: String,
 
     /// Peer ID for GET request
     #[arg(short, long, default_value = "00112233445566778899")]
@@ -88,11 +90,11 @@ struct PeersArgs {
 struct HandshakeArgs {
     /// File with torrent information
     #[arg(required = true)]
-    torrent_file: String,
+    torrent_source: String,
 
     /// IP & Port of peer to connect to
     #[clap(required = true, value_parser = peer_validator)]
-    peer: SocketAddrV4,
+    peer: SocketAddr,
 
     /// Peer ID for handshake
     #[arg(short = 'i', long, default_value = "00112233445566778899")]
@@ -149,7 +151,7 @@ struct DownloadArgs {
 struct DownloadV2Args {
     /// File with torrent information
     #[arg(required = true)]
-    torrent_file: String,
+    torrent_source: String,
 
     /// Output directory
     #[arg(short, long, value_parser = pathbuf_parse, default_value = "downloads/")]
@@ -177,32 +179,8 @@ fn pathbuf_parse(val: &str) -> Result<PathBuf, String> {
 }
 
 /// Validate peer ip:port format.
-fn peer_validator(val: &str) -> Result<SocketAddrV4, String> {
-    let port_ip_re = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
-    match port_ip_re.captures(val) {
-        None => Err("Invalid ip:port format specified".to_string()),
-        Some(captures) => {
-            let ip_parts = (1..=4)
-                .map(|i| {
-                    captures
-                        .get(i)
-                        .unwrap()
-                        .as_str()
-                        .parse()
-                        .map_err(|_| format!("IP part {} not in the range 0-255", i))
-                })
-                .collect::<Result<Vec<u8>, String>>()?;
-            Ok(SocketAddrV4::new(
-                Ipv4Addr::new(ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]),
-                captures
-                    .get(5)
-                    .unwrap()
-                    .as_str()
-                    .parse()
-                    .map_err(|_| "Port not in the range 0-65535")?,
-            ))
-        }
-    }
+fn peer_validator(val: &str) -> Result<SocketAddr, String> {
+    parse_socket_addr(val).map_err(|err| err.to_string())
 }
 
 fn main() -> Result<(), BitTorrentError> {
@@ -216,6 +194,9 @@ fn main() -> Result<(), BitTorrentError> {
             println!("{}", decoded);
         }
         Subcommand::Info(info_args) => {
+            let content = fs::read(&info_args.torrent_file)?;
+            let decoded_value = consume_bencoded_value(&mut &content[..])?;
+            println!("{:#?}", decoded_value);
             let meta_info = MetaInfo::from_file(&info_args.torrent_file)?;
             let info_hash = meta_info.info_hash()?;
             println!("Tracker URL: {}", meta_info.preferred_tracker());
@@ -231,18 +212,17 @@ fn main() -> Result<(), BitTorrentError> {
             }
         }
         Subcommand::Peers(peers_args) => {
-            let meta_info = MetaInfo::from_file(&peers_args.torrent_file)?;
-            let mut tracker = Tracker::new(&meta_info)?;
-            let tracker_info = tracker.query(&peers_args.peer_id, peers_args.port, false)?;
-            for sock in tracker_info.peers()? {
+            let torrent_source = TorrentSource::from_string(&peers_args.torrent_source)?;
+            let mut tracker = Tracker::new(torrent_source, peers_args.peer_id, peers_args.port)?;
+            let (peers, _) = tracker.query()?;
+            for sock in peers {
                 println!("{}", sock);
             }
         }
         Subcommand::Handshake(handshake_args) => {
-            let meta_info = MetaInfo::from_file(&handshake_args.torrent_file)?;
             let mut connection = TcpPeer {
-                address: SocketAddr::V4(handshake_args.peer),
-                meta_info,
+                address: handshake_args.peer,
+                torrent_source: TorrentSource::from_string(&handshake_args.torrent_source)?,
                 peer_id: handshake_args.peer_id,
                 stream: TcpStream::connect(&handshake_args.peer)
                     .with_context(|| "Error connecting to peer")?,
@@ -258,7 +238,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::DownloadPiece(download_piece_args) => {
             let meta_info = MetaInfo::from_file(&download_piece_args.torrent_file)?;
             let data = download_piece_from_peer::<TcpPeer>(
-                &meta_info,
+                meta_info,
                 download_piece_args.piece_id as u32,
                 &download_piece_args.peer_id,
                 download_piece_args.port,
@@ -273,7 +253,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Download(download_args) => {
             let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
             let full_file =
-                download_file::<TcpPeer>(&meta_info, &download_args.peer_id, download_args.port)?;
+                download_file::<TcpPeer>(meta_info, &download_args.peer_id, download_args.port)?;
             fs::write(&download_args.output, full_file).with_context(|| "Error writing to disk")?;
             println!(
                 "Downloaded {} to {}.",
@@ -281,16 +261,16 @@ fn main() -> Result<(), BitTorrentError> {
             );
         }
         Subcommand::DownloadV2(download_args) => {
-            let meta_info = MetaInfo::from_file(&download_args.torrent_file)?;
-            let full_file = corkboard_download::<TcpPeer>(
-                meta_info.clone(),
+            let torrent_source = TorrentSource::from_string(&download_args.torrent_source)?;
+            let temp_path: PathBuf = PathBuf::from("tmp/in-progress/").join(torrent_source.name());
+            let (full_file, meta_info) = corkboard_download::<TcpPeer>(
+                torrent_source,
                 Config {
                     peer_id: download_args.peer_id,
                     port: download_args.port,
                     workers: download_args.workers,
                     verbose: download_args.verbose,
-                    temp_path: PathBuf::from("tmp/in-progress/")
-                        .join(info_field!(&meta_info.info, name)),
+                    temp_path,
                     ..Default::default()
                 },
             )?;
@@ -300,7 +280,7 @@ fn main() -> Result<(), BitTorrentError> {
                 .with_context(|| "Error saving torrent file(s)")?;
             println!(
                 "Downloaded {} to {}.",
-                download_args.torrent_file,
+                download_args.torrent_source,
                 &download_args.output.to_str().unwrap()
             );
         }

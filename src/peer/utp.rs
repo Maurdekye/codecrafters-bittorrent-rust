@@ -1,8 +1,11 @@
-use std::{net::{UdpSocket, SocketAddr}, sync::{atomic::AtomicBool, Arc}};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use anyhow::Context;
 
-use crate::{error::BitTorrentError, info::MetaInfo};
+use crate::{error::BitTorrentError, info::MetaInfo, torrent_source::TorrentSource};
 
 use super::PeerConnection;
 
@@ -25,7 +28,7 @@ impl UtpMessage {
 #[derive(Debug)]
 pub struct UtpPeer {
     pub address: SocketAddr,
-    pub meta_info: MetaInfo,
+    pub torrent_source: TorrentSource,
     pub peer_id: String,
     pub socket: UdpSocket,
     pub bitfield: Vec<bool>,
@@ -34,14 +37,19 @@ pub struct UtpPeer {
     pub ack_nr: u16,
 }
 
-impl UtpPeer {
-    
-}
+impl UtpPeer {}
 
 impl PeerConnection for UtpPeer {
     type Error = BitTorrentError;
 
-    fn new(peer: SocketAddr, meta_info: MetaInfo, peer_id: String, _port: u16, _verbose: bool, _killswitch: Arc<AtomicBool>) -> Result<Self, Self::Error>
+    fn new(
+        peer: SocketAddr,
+        torrent_source: TorrentSource,
+        peer_id: String,
+        _port: u16,
+        _verbose: bool,
+        _killswitch: Arc<AtomicBool>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized,
     {
@@ -53,7 +61,7 @@ impl PeerConnection for UtpPeer {
             seq_nr: 1,
             ack_nr: 0,
             address: peer,
-            meta_info,
+            torrent_source,
             peer_id,
         };
 
@@ -74,8 +82,8 @@ impl PeerConnection for UtpPeer {
         &self.address
     }
 
-    fn meta_info(&self) -> &MetaInfo {
-        &self.meta_info
+    fn meta_info(&self) -> Option<&MetaInfo> {
+        unimplemented!()
     }
 
     fn bitfield(&self) -> &Vec<bool> {
@@ -83,6 +91,6 @@ impl PeerConnection for UtpPeer {
     }
 
     fn sever(&self) -> Result<(), Self::Error> {
-        todo!()
+        unimplemented!()
     }
 }

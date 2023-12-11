@@ -1,0 +1,22 @@
+[
+    {
+        "domain": "router.utorrent.com",
+        "port": 6881
+    },
+    {
+        "domain": "router.bittorrent.com",
+        "port": 6881
+    },
+    {
+        "domain": "dht.transmissionbt.com",
+        "port": 6881
+    },
+    {
+        "domain": "router.bitcomet.com",
+        "port": 6881
+    },
+    {
+        "domain": "dht.aelitis.com",
+        "port": 6881
+    }
+]

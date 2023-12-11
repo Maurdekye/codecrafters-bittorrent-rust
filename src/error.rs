@@ -3,6 +3,8 @@ use std::error::Error;
 use std::fmt::Display;
 use std::sync::PoisonError;
 
+use hex::FromHexError;
+
 
 #[macro_export]
 macro_rules! bterror {
@@ -66,5 +68,16 @@ impl From<TryFromSliceError> for BitTorrentError {
     }
 }
 
+impl From<FromHexError> for BitTorrentError {
+    fn from(value: FromHexError) -> Self {
+        BitTorrentError::new(value.to_string())
+    }
+}
+
+impl From<multihash::Error> for BitTorrentError {
+    fn from(value: multihash::Error) -> Self {
+        BitTorrentError::new(value.to_string())
+    }
+}
 
 impl Error for BitTorrentError {}

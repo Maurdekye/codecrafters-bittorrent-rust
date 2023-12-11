@@ -1,11 +1,12 @@
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::sync::{mpsc, Mutex};
 use std::thread;
 
 use anyhow::Context;
 
 use crate::peer::PeerConnection;
+use crate::torrent_source::TorrentSource;
 use crate::tracker::multimodal::Tracker;
 use crate::{bterror, error::BitTorrentError, info::MetaInfo};
 
@@ -14,29 +15,42 @@ pub mod corkboard;
 /// Download piece `piece_id` of the file from the torrent associated with the `meta_info` object passed.
 /// Returns a byte vector containing the piece data.
 pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
-    meta_info: &MetaInfo,
+    meta_info: MetaInfo,
     piece_id: u32,
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let mut tracker = Tracker::new(&meta_info)?;
-    let tracker_response = tracker.query(&peer_id, port, false)?;
-    let peers = tracker_response.peers()?;
+    let mut tracker = Tracker::new(
+        TorrentSource::File(meta_info.clone()),
+        peer_id.to_string(),
+        port,
+    )?;
+    let (peers, _) = tracker.query()?;
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
-    let mut connection = T::new(*peer, meta_info.clone(), peer_id.to_string(), port, false, Arc::new(AtomicBool::new(false)))?;
+    let mut connection = T::new(
+        *peer,
+        TorrentSource::File(meta_info.clone()),
+        peer_id.to_string(),
+        port,
+        false,
+        Arc::new(AtomicBool::new(false)),
+    )?;
     connection.download_piece(piece_id)
 }
 
 /// Download the full file from the torrent associated with the `meta_info` object passed.
 /// Returns a byte vector containing the file data.
 pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
-    meta_info: &MetaInfo,
+    meta_info: MetaInfo,
     peer_id: &str,
     port: u16,
 ) -> Result<Vec<u8>, BitTorrentError> {
-    let mut tracker = Tracker::new(&meta_info)?;
-    let tracker_response = tracker.query(&peer_id, port, false)?;
-    let peers = tracker_response.peers()?;
+    let mut tracker = Tracker::new(
+        TorrentSource::File(meta_info.clone()),
+        peer_id.to_string(),
+        port,
+    )?;
+    let (peers, _) = tracker.query()?;
 
     let (worker_send, worker_recieve) = mpsc::channel();
     let worker_send = Arc::new(Mutex::new(worker_send));
@@ -62,7 +76,14 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
         let peer_id = peer_id.to_string();
         thread::spawn(move || {
             // initialize connection
-            let mut connection = T::new(peer, meta_info, peer_id, port, false, Arc::new(AtomicBool::new(false)))?;
+            let mut connection = T::new(
+                peer,
+                TorrentSource::File(meta_info),
+                peer_id,
+                port,
+                false,
+                Arc::new(AtomicBool::new(false)),
+            )?;
 
             // wait for messages
             loop {

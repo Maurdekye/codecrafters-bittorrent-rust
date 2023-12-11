@@ -3,7 +3,10 @@ use std::{
     fmt::Display,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
-    sync::{atomic::{AtomicBool, self}, Arc},
+    sync::{
+        atomic::{self, AtomicBool},
+        Arc,
+    },
     time::{Duration, SystemTime},
 };
 
@@ -17,13 +20,14 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     info_field,
+    torrent_source::TorrentSource,
     util::{bytes_to_hex, cap_length, sha1_hash, timestr},
 };
 
 use super::{
     message::{
-        ExtensionHandshake, ExtensionMessage, HandshakeMessage, PeerMessage, PieceMessage,
-        RequestMessage, EncodeDecode,
+        EncodeDecode, ExtensionHandshake, ExtensionMessage, HandshakeMessage, PeerMessage,
+        PieceMessage, RequestMessage,
     },
     PeerConnection,
 };
@@ -34,7 +38,7 @@ const CHUNK_SIZE: u32 = 16384;
 const IN_FLIGHT: usize = 4;
 /// connection timeout when attempting to connect to a peer's tcp socket
 const TCP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
-/// timeout while waiting for a peer message to arrive
+/// timeout while waiting for a peer message to arrive, or while attempting to write to a peer's buffer
 const TCP_READWRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// maximum number of allowed rejections before the peer is disconnected
 const MAX_REJECTIONS: usize = 64;
@@ -43,7 +47,7 @@ const MAX_REJECTIONS: usize = 64;
 pub struct TcpPeer {
     #[allow(unused)]
     pub address: SocketAddr,
-    pub meta_info: MetaInfo,
+    pub torrent_source: TorrentSource,
     pub peer_id: String,
     pub stream: TcpStream,
     pub bitfield: Vec<bool>,
@@ -79,7 +83,7 @@ impl TcpPeer {
     pub fn handshake(&mut self) -> Result<HandshakeMessage, BitTorrentError> {
         self.log("Sending handshake");
         self.stream
-            .write(&HandshakeMessage::new(&self.meta_info, &self.peer_id)?.encode())
+            .write(&HandshakeMessage::new(&self.torrent_source, &self.peer_id)?.encode())
             .with_context(|| "Unable to write to peer")?;
         self.log("Waiting for handshake response");
         let buf = self.read_n_bytes(68)?;
@@ -93,7 +97,7 @@ impl TcpPeer {
     pub fn try_clone(&self) -> Result<Self, BitTorrentError> {
         Ok(TcpPeer {
             address: self.address,
-            meta_info: self.meta_info.clone(),
+            torrent_source: self.torrent_source.clone(),
             peer_id: self.peer_id.clone(),
             stream: self.stream.try_clone()?,
             bitfield: self.bitfield.clone(),
@@ -148,7 +152,7 @@ impl PeerConnection for TcpPeer {
     /// Create a new peer connection.
     fn new(
         peer: SocketAddr,
-        meta_info: MetaInfo,
+        torrent_source: TorrentSource,
         peer_id: String,
         port: u16,
         verbose: bool,
@@ -156,12 +160,9 @@ impl PeerConnection for TcpPeer {
     ) -> Result<TcpPeer, BitTorrentError> {
         let mut connection = TcpPeer {
             address: peer,
-            stream: TcpStream::connect_timeout(
-                &peer,
-                TCP_CONNECTION_TIMEOUT,
-            )
-            .with_context(|| "Error connecting to peer")?,
-            meta_info,
+            stream: TcpStream::connect_timeout(&peer, TCP_CONNECTION_TIMEOUT)
+                .with_context(|| "Error connecting to peer")?,
+            torrent_source,
             peer_id,
             bitfield: vec![],
             port,
@@ -184,7 +185,7 @@ impl PeerConnection for TcpPeer {
                 messages: Some(
                     [
                         // ("ut_pex", 1),
-                        // ("ut_metadata", 2),
+                        ("ut_metadata", 2),
                         // ("upload_only", 3),
                         // ("ut_holepunch", 4),
                         // ("lt_donthave", 7),
@@ -228,8 +229,12 @@ impl PeerConnection for TcpPeer {
             }
         }
 
+        // accept meta info from extension handshake
+        let meta_info: MetaInfo = todo!();
+        connection.torrent_source = TorrentSource::File(meta_info);
+
         // accept bitfield or have- variant
-        let pieces = connection.meta_info.num_pieces();
+        let pieces = meta_info.num_pieces();
         connection.bitfield = match connection.await_peer_message()? {
             PeerMessage::Bitfield(bitfield) => bitfield[..pieces].to_vec(),
             PeerMessage::HaveAll => vec![true; pieces],
@@ -258,9 +263,12 @@ impl PeerConnection for TcpPeer {
 
     /// Download a piece of the file, with `piece_id` corresponding to the piece to download.
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, BitTorrentError> {
-        let piece_offset = piece_id * *info_field!(&self.meta_info.info, piece_length) as u32;
-        let chunk_size = (self.meta_info.length() as u32 - piece_offset)
-            .min(*info_field!(&self.meta_info.info, piece_length) as u32);
+        let meta_info = self
+            .meta_info()
+            .ok_or(bterror!("Can't download a file without meta info!"))?;
+        let piece_offset = piece_id * *info_field!(&meta_info.info, piece_length) as u32;
+        let chunk_size = (meta_info.length() as u32 - piece_offset)
+            .min(*info_field!(&meta_info.info, piece_length) as u32);
 
         let mut chunks = (0..chunk_size)
             .step_by(CHUNK_SIZE as usize)
@@ -321,7 +329,10 @@ impl PeerConnection for TcpPeer {
 
         // check hash
         let hash = sha1_hash(&full_piece);
-        let check_hash = self.meta_info.pieces()?[piece_id as usize];
+        let meta_info = self
+            .meta_info()
+            .ok_or(bterror!("Can't download a file without meta info!"))?;
+        let check_hash = meta_info.pieces()?[piece_id as usize];
         if hash != check_hash {
             Err(bterror!(
                 "Piece hash mismatch: meta info hash: {}, actual hash: {}",
@@ -343,8 +354,11 @@ impl PeerConnection for TcpPeer {
         &self.address
     }
 
-    fn meta_info(&self) -> &MetaInfo {
-        &self.meta_info
+    fn meta_info<'a>(&'a self) -> Option<&'a MetaInfo> {
+        match &self.torrent_source {
+            TorrentSource::File(meta_info) => Some(meta_info),
+            _ => None,
+        }
     }
 
     fn bitfield(&self) -> &Vec<bool> {

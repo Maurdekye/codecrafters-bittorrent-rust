@@ -1,11 +1,17 @@
 use std::{
     collections::HashMap,
+    fs::create_dir_all,
+    iter::once,
     net::SocketAddr,
+    path::{Path, PathBuf},
     sync::{atomic::AtomicBool, mpsc::channel, Arc, RwLock},
-    thread, path::{Path, PathBuf}, fs::create_dir_all,
+    thread::{self},
 };
 
-use crate::{bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection, util::timestr};
+use crate::{
+    bterror, error::BitTorrentError, info::MetaInfo, peer::PeerConnection,
+    torrent_source::TorrentSource, tracker::multimodal::Tracker, util::timestr,
+};
 
 mod monitor;
 mod seeder;
@@ -14,22 +20,18 @@ mod worker;
 
 pub struct Corkboard {
     pub meta_info: MetaInfo,
-    pub peer_id: String,
-    pub port: u16,
     pub pieces: Vec<Piece>,
     pub peers: HashMap<SocketAddr, Peer>,
     pub finishing: Arc<AtomicBool>,
 }
 
 impl Corkboard {
-    pub fn new(meta_info: MetaInfo, peer_id: String, port: u16) -> Result<Self, BitTorrentError> {
+    pub fn new(meta_info: MetaInfo) -> Result<Self, BitTorrentError> {
         Ok(Self {
             pieces: meta_info.pieces()?.into_iter().map(Piece::new).collect(),
             peers: HashMap::new(),
             finishing: Arc::new(AtomicBool::new(false)),
             meta_info,
-            peer_id,
-            port,
         })
     }
 }
@@ -159,22 +161,27 @@ impl Default for Config {
 /// connect to and which piece to acquire, and once afterwards to validate and submit their
 /// successful download to the board.
 pub fn corkboard_download<T: PeerConnection>(
-    meta_info: MetaInfo,
+    torrent_source: TorrentSource,
     config: Config,
-) -> Result<Vec<u8>, BitTorrentError> {
+) -> Result<(Vec<u8>, MetaInfo), BitTorrentError> {
     let log = |msg: String| {
         if config.verbose {
             println!("[{}] {msg}", timestr())
         }
     };
 
+    let tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
+
+    let meta_info = match torrent_source {
+        TorrentSource::File(meta_info) => meta_info,
+        TorrentSource::Magnet(magnet) => {
+            todo!("acquire meta_info from peers")
+        }
+    };
+
     // create corkboard
     log(format!("Initializing Corkboard"));
-    let corkboard: Arc<RwLock<Corkboard>> = Arc::new(RwLock::new(Corkboard::new(
-        meta_info,
-        config.peer_id.to_string(),
-        config.port,
-    )?));
+    let corkboard: Arc<RwLock<Corkboard>> = Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
 
     if config.verbose {
         println!("Starting download");
@@ -187,21 +194,32 @@ pub fn corkboard_download<T: PeerConnection>(
 
     // spawn subtasks
     log(format!("Starting subtasks"));
-    let tasks = [monitor::monitor, watchdog::watchdog, seeder::seeder].map(|task| {
-        let corkboard = corkboard.clone();
-        let (notify, alarm) = channel();
-        let config = config.clone();
-        let handle = thread::spawn(move || task(corkboard, alarm, config));
-        (handle, notify)
-    });
+    let tasks = [monitor::monitor, seeder::seeder]
+        .map(|task| {
+            let corkboard = corkboard.clone();
+            let (notify, alarm) = channel();
+            let meta_info = meta_info.clone();
+            let config = config.clone();
+            let handle = thread::spawn(move || task(corkboard, alarm, meta_info, config));
+            (handle, notify)
+        })
+        .into_iter()
+        .chain(once({
+            let corkboard = corkboard.clone();
+            let (notify, alarm) = channel();
+            let config = config.clone();
+            let handle = thread::spawn(move || watchdog::watchdog(corkboard, alarm, tracker, config));
+            (handle, notify)
+        }));
 
     // start workers
     log(format!("Starting workers"));
     let workers = (0..config.workers)
         .map(|worker_id| {
             let corkboard = corkboard.clone();
+            let meta_info = meta_info.clone();
             let config = config.clone();
-            thread::spawn(move || worker::worker::<T>(corkboard, worker_id, config))
+            thread::spawn(move || worker::worker::<T>(corkboard, worker_id, meta_info, config))
         })
         .collect::<Vec<_>>();
 
@@ -248,5 +266,5 @@ pub fn corkboard_download<T: PeerConnection>(
 
     log(format!("Done"));
 
-    Ok(data)
+    Ok((data, meta_info))
 }

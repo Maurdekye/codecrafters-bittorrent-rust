@@ -1,6 +1,6 @@
 use std::{sync::{Arc, RwLock, mpsc::{Receiver, RecvTimeoutError}}, time::Duration};
 
-use crate::{error::BitTorrentError, util::timestr};
+use crate::{error::BitTorrentError, util::timestr, info::MetaInfo};
 
 use super::{Corkboard, PeerState, PieceState, Config};
 
@@ -8,7 +8,7 @@ use super::{Corkboard, PeerState, PieceState, Config};
 const INTERVAL: Duration = Duration::from_secs(5);
 
 /// Monitor thread: reads out statistics about the current download at regular intervals
-pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, config: Config) -> Result<(), BitTorrentError> {
+pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, _meta_info: MetaInfo, config: Config) -> Result<(), BitTorrentError> {
     let log = |msg: String| if config.verbose {println!("[{}][M] {msg}", timestr())};
 
     log(format!("Monitor init"));

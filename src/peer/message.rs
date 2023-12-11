@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 
 use crate::bencode::encode::bencode_value;
+use crate::torrent_source::TorrentSource;
 use crate::{
     bencode::decode::consume_bencoded_value,
     bterror,
     error::BitTorrentError,
-    info::MetaInfo,
     util::{decode_bitfield_be, encode_bitfield_be},
 };
 
@@ -244,9 +244,12 @@ pub struct HandshakeMessage {
 
 impl HandshakeMessage {
     /// Create a new HandshakeMessage.
-    pub fn new(meta_info: &MetaInfo, peer_id: &str) -> Result<HandshakeMessage, BitTorrentError> {
+    pub fn new(
+        torrent_source: &TorrentSource,
+        peer_id: &str,
+    ) -> Result<HandshakeMessage, BitTorrentError> {
         Ok(HandshakeMessage {
-            info_hash: meta_info.info_hash()?,
+            info_hash: torrent_source.hash()?,
             peer_id: peer_id.as_bytes().to_vec(),
         })
     }

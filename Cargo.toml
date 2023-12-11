@@ -26,6 +26,7 @@ chrono = "0.4.31"
 clap = { version = "4.0.32", features = ["derive"] }                # creating a cli
 hex = "0.4.3"
 lazy_static = "1.4.0"
+multihash = "0.19.1"
 percent-encoding = "2.3.1"
 rand = "0.8.5"
 regex = "1"

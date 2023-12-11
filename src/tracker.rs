@@ -9,6 +9,7 @@ use crate::{
 };
 
 pub mod multimodal;
+pub mod dht;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -19,7 +20,7 @@ pub enum TrackerResponse {
 
 #[derive(Deserialize)]
 pub struct SuccessfulTrackerResponse {
-    pub interval: usize,
+    pub interval: u64,
     pub peers: String,
 }
 

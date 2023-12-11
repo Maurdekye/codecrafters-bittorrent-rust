@@ -14,14 +14,15 @@ use anyhow::Context;
 use crate::{
     bterror,
     error::BitTorrentError,
+    info::MetaInfo,
     peer::{
         message::{HandshakeMessage, PeerMessage, PieceMessage},
         tcp::TcpPeer,
     },
-    util::timestr,
+    util::timestr, torrent_source::TorrentSource,
 };
 
-use super::{Corkboard, Piece, PieceState, Config};
+use super::{Config, Corkboard, Piece, PieceState};
 
 /// time in between non-blocking tcp listener requests
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -30,6 +31,7 @@ const INTERVAL: Duration = Duration::from_secs(1);
 pub fn seeder(
     corkboard: Arc<RwLock<Corkboard>>,
     alarm: Receiver<()>,
+    meta_info: MetaInfo,
     config: Config,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
@@ -46,35 +48,30 @@ pub fn seeder(
     //     .unwrap();
     let listener = TcpListener::bind("0.0.0.0:0").unwrap();
     listener.set_nonblocking(true)?;
-    let port = corkboard.read().unwrap().port;
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let address = stream.peer_addr().unwrap();
                 let connection_board = corkboard.clone();
+                let peer_id = config.peer_id.clone();
+                let meta_info = meta_info.clone();
 
                 log(format!("New connection from {address}"));
                 thread::spawn(move || {
                     let log = |msg: String| println!("[{}][{}] {msg}", timestr(), address);
-                    let (meta_info, peer_id, killswitch) = connection_board
+                    let killswitch = connection_board
                         .read()
-                        .map(|board| {
-                            (
-                                board.meta_info.clone(),
-                                board.peer_id.clone(),
-                                board.finishing.clone(),
-                            )
-                        })
+                        .map(|board| board.finishing.clone())
                         .unwrap();
 
                     // set up connection
                     let mut connection = TcpPeer {
                         stream,
                         address,
-                        meta_info,
+                        torrent_source: TorrentSource::File(meta_info),
                         peer_id,
-                        port,
+                        port: config.port,
                         verbose: config.verbose,
                         bitfield: Vec::new(),
                         timeout: Some(INTERVAL),
