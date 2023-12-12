@@ -22,7 +22,7 @@ use crate::{
         download_file,
     },
     info::MetaInfo,
-    peer::tcp::TcpPeer,
+    peer::{tcp::TcpPeer, message::PeerMessageCodec},
     util::bytes_to_hex, torrent_source::TorrentSource,
 };
 
@@ -48,6 +48,7 @@ struct Args {
 #[derive(Parser)]
 enum Subcommand {
     Decode(DecodeArgs),
+    DecodeHex(DecodeHexArgs),
     Info(InfoArgs),
     Peers(PeersArgs),
     Handshake(HandshakeArgs),
@@ -60,6 +61,13 @@ enum Subcommand {
 #[derive(Parser)]
 struct DecodeArgs {
     /// String to decode
+    #[arg(required = true)]
+    raw_content: String,
+}
+
+#[derive(Parser)]
+struct DecodeHexArgs {
+    /// Hex string to decode
     #[arg(required = true)]
     raw_content: String,
 }
@@ -185,13 +193,20 @@ fn peer_validator(val: &str) -> Result<SocketAddr, String> {
 
 fn main() -> Result<(), BitTorrentError> {
     let args = Args::parse();
-    // let args = Args::parse_from(["_", "download-v2", "torrents/invincible.torrent", "-w32"]);
-
+    
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
             let mut content = decode_args.raw_content.as_bytes();
             let decoded = consume_bencoded_value(&mut content)?;
             println!("{}", decoded);
+        }
+        Subcommand::DecodeHex(decode_args) => {
+            let content = hex::decode(decode_args.raw_content)?;
+            let mut cslice = &content[..];
+            while cslice.len() > 0 {
+                let decoded = consume_bencoded_value(&mut cslice)?;
+                println!("{:#?}", decoded);
+            }
         }
         Subcommand::Info(info_args) => {
             let content = fs::read(&info_args.torrent_file)?;
@@ -214,7 +229,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Peers(peers_args) => {
             let torrent_source = TorrentSource::from_string(&peers_args.torrent_source)?;
             let mut tracker = Tracker::new(torrent_source, peers_args.peer_id, peers_args.port)?;
-            let (peers, _) = tracker.query()?;
+            let (peers, _) = tracker.query();
             for sock in peers {
                 println!("{}", sock);
             }
@@ -231,6 +246,9 @@ fn main() -> Result<(), BitTorrentError> {
                 verbose: false,
                 timeout: Some(Duration::from_secs(60)),
                 killswitch: Arc::new(AtomicBool::new(false)),
+                encoder: PeerMessageCodec::default(),
+                decoder: PeerMessageCodec::default(),
+                choked: false,
             };
             let response = connection.handshake()?;
             println!("Peer ID: {}", bytes_to_hex(&response.peer_id));
@@ -262,6 +280,7 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DownloadV2(download_args) => {
             let torrent_source = TorrentSource::from_string(&download_args.torrent_source)?;
+            // dbg!(&torrent_source);
             let temp_path: PathBuf = PathBuf::from("tmp/in-progress/").join(torrent_source.name());
             let (full_file, meta_info) = corkboard_download::<TcpPeer>(
                 torrent_source,

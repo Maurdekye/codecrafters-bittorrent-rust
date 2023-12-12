@@ -5,7 +5,7 @@ use regex::Regex;
 use sha1::{Digest, Sha1};
 use std::{
     io::Read,
-    net::{TcpStream, UdpSocket, SocketAddrV4, Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream, UdpSocket},
     str::from_utf8,
     time::{Duration, SystemTime},
 };
@@ -13,7 +13,8 @@ use std::{
 use crate::{bterror, error::BitTorrentError};
 
 lazy_static! {
-    pub static ref SOCKADDR_V4: Regex = Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
+    pub static ref SOCKADDR_V4: Regex =
+        Regex::new(r"(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})").unwrap();
 }
 
 /// Convert a hex string to a byte array.
@@ -201,6 +202,25 @@ pub fn querystring_encode(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Decode a URL-safe percent-escaped string into a byte slice.
+pub fn querystring_decode(s: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let hex = chars.next().unwrap().to_string() + &chars.next().unwrap().to_string();
+            bytes.push(u8::from_str_radix(&hex, 16).unwrap());
+        } else if c == '+' {
+            bytes.push(b' ');
+        } else {
+            bytes.push(c as u8);
+        }
+    }
+
+    bytes
+}
+
 pub fn cap_length(msg: String, max_len: usize) -> String {
     if msg.len() > max_len {
         format!("{}...", &msg[..max_len - 3])
@@ -231,7 +251,7 @@ pub fn parse_socket_addr(val: &str) -> Result<SocketAddr, BitTorrentError> {
                     .unwrap()
                     .as_str()
                     .parse()
-                    .map_err(|_| bterror!("Port not in the range 0-65535"))?, 
+                    .map_err(|_| bterror!("Port not in the range 0-65535"))?,
             )))
         }
     }

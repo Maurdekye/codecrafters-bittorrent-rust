@@ -12,8 +12,8 @@ pub enum TorrentSource {
 
 impl TorrentSource {
     pub fn from_string(s: &str) -> Result<Self, BitTorrentError> {
-        match s.get(..9) {
-            Some("magnet?:") => Ok(TorrentSource::Magnet(Magnet::from_uri(s.to_string())?)),
+        match s.get(..8) {
+            Some("magnet:?") => Ok(TorrentSource::Magnet(Magnet::from_uri(s.to_string())?)),
             _ => Ok(TorrentSource::File(MetaInfo::from_file(&s)?)),
         }
     }

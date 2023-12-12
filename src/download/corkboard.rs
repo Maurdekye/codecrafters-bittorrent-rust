@@ -170,20 +170,49 @@ pub fn corkboard_download<T: PeerConnection>(
         }
     };
 
-    let tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
+    let mut tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
 
+    // get meta info
     let meta_info = match torrent_source {
         TorrentSource::File(meta_info) => meta_info,
-        TorrentSource::Magnet(magnet) => {
-            todo!("acquire meta_info from peers")
+        TorrentSource::Magnet(_) => {
+            if !config.verbose {
+                println!("Retrieving metadata");
+            } else {
+                log(format!("Retrieving metadata"));
+            }
+            (|| loop {
+                for peer in tracker.query().0 {
+                    match T::new(
+                        peer,
+                        torrent_source.clone(),
+                        config.peer_id.clone(),
+                        config.port,
+                        config.verbose,
+                        Arc::new(AtomicBool::new(false)),
+                    ) {
+                        Ok(peer) => {
+                            return Ok::<_, BitTorrentError>(
+                                peer.meta_info()
+                                    .ok_or(bterror!("Meta info was not included"))?
+                                    .clone(),
+                            )
+                        }
+                        Err(err) => {
+                            log(format!("[{}] Disconnected from peer: {}", peer, err));
+                        },
+                    }
+                }
+            })()?
         }
     };
 
     // create corkboard
     log(format!("Initializing Corkboard"));
-    let corkboard: Arc<RwLock<Corkboard>> = Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
+    let corkboard: Arc<RwLock<Corkboard>> =
+        Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
 
-    if config.verbose {
+    if !config.verbose {
         println!("Starting download");
     } else {
         log(format!(
@@ -208,7 +237,8 @@ pub fn corkboard_download<T: PeerConnection>(
             let corkboard = corkboard.clone();
             let (notify, alarm) = channel();
             let config = config.clone();
-            let handle = thread::spawn(move || watchdog::watchdog(corkboard, alarm, tracker, config));
+            let handle =
+                thread::spawn(move || watchdog::watchdog(corkboard, alarm, tracker, config));
             (handle, notify)
         }));
 

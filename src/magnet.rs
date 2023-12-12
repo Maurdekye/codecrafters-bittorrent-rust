@@ -1,6 +1,6 @@
 use multihash::Multihash;
 
-use crate::{bterror, error::BitTorrentError};
+use crate::{bterror, error::BitTorrentError, util::querystring_decode};
 
 #[derive(Debug, Clone)]
 pub struct Magnet {
@@ -42,9 +42,9 @@ impl Magnet {
                         _ => return Err(bterror!("Invalid xt")),
                     }
                 }
-                "dn" => dn = Some(value.to_string()),
-                "tr" => tr.push(value.to_string()),
-                "x.pe" => xpe.push(value.to_string()),
+                "dn" => dn = Some(String::from_utf8(querystring_decode(value))?),
+                "tr" => tr.push(String::from_utf8(querystring_decode(value))?),
+                "x.pe" => xpe.push(String::from_utf8(querystring_decode(value))?),
                 key => return Err(bterror!("Unknown key in magnet uri: {key}")),
             }
         }

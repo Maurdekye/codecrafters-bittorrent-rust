@@ -25,7 +25,7 @@ pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
         peer_id.to_string(),
         port,
     )?;
-    let (peers, _) = tracker.query()?;
+    let (peers, _) = tracker.query();
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
     let mut connection = T::new(
         *peer,
@@ -50,7 +50,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
         peer_id.to_string(),
         port,
     )?;
-    let (peers, _) = tracker.query()?;
+    let (peers, _) = tracker.query();
 
     let (worker_send, worker_recieve) = mpsc::channel();
     let worker_send = Arc::new(Mutex::new(worker_send));

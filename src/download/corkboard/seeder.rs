@@ -16,8 +16,8 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     peer::{
-        message::{HandshakeMessage, PeerMessage, PieceMessage},
-        tcp::TcpPeer,
+        message::{HandshakeMessage, PeerMessage, PieceMessage, PeerMessageCodec},
+        tcp::{TcpPeer, CODEC_EXTENSION_CONFIG},
     },
     util::timestr, torrent_source::TorrentSource,
 };
@@ -76,6 +76,9 @@ pub fn seeder(
                         bitfield: Vec::new(),
                         timeout: Some(INTERVAL),
                         killswitch,
+                        encoder: PeerMessageCodec::new(CODEC_EXTENSION_CONFIG.clone()),
+                        decoder: PeerMessageCodec::default(),
+                        choked: true,
                     };
 
                     // recieve handshake

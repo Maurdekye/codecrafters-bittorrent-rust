@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     net::{SocketAddr, UdpSocket},
     time::{Duration, SystemTime},
 };
@@ -20,6 +21,7 @@ use crate::{
 use super::dht::Dht;
 
 const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+const DHT_QUERY_INTERVAL: u64 = 30;
 
 lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
@@ -28,7 +30,7 @@ lazy_static! {
 pub struct Tracker {
     pub torrent_source: TorrentSource,
     active_connection: TrackerConnection,
-    pub trackers: Vec<String>,
+    pub trackers: VecDeque<String>,
     pub peer_id: String,
     pub port: u16,
 }
@@ -39,10 +41,10 @@ impl Tracker {
         peer_id: String,
         port: u16,
     ) -> Result<Tracker, BitTorrentError> {
-        let mut trackers = torrent_source.trackers();
+        let mut trackers: VecDeque<String> = torrent_source.trackers().into();
         Ok(Tracker {
-            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source)?,
-            trackers: trackers,
+            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source),
+            trackers,
             torrent_source,
             peer_id,
             port,
@@ -50,22 +52,26 @@ impl Tracker {
     }
 
     fn _next_tracker(
-        trackers: &mut Vec<String>,
+        trackers: &mut VecDeque<String>,
         torrent_source: &TorrentSource,
-    ) -> Result<TrackerConnection, BitTorrentError> {
-        Ok(match trackers.pop() {
-            Some(url) => TrackerConnection::new(url)?,
-            None => TrackerConnection::Dht(Dht::new(torrent_source.clone())),
-        })
+    ) -> TrackerConnection {
+        loop {
+            match trackers.pop_front() {
+                Some(url) => match TrackerConnection::new(url.clone()) {
+                    Ok(tracker_connection) => return tracker_connection,
+                    Err(err) => println!("Error connecting to tracker at {}: {}", url, err),
+                },
+                None => return TrackerConnection::Dht(Dht::new(torrent_source.clone())),
+            }
+        }
     }
 
-    fn next_tracker(&mut self) -> Result<(), BitTorrentError> {
-        self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source)?;
-        Ok(())
+    fn cycle_trackers(&mut self) {
+        self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source);
     }
 
-    pub fn query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
-        match (|| match &mut self.active_connection {
+    fn _query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
+        match &mut self.active_connection {
             TrackerConnection::Http(announce) => {
                 let client = reqwest::blocking::Client::new();
 
@@ -128,13 +134,22 @@ impl Tracker {
                 }
                 udp_connection.annouce(&self.torrent_source, &self.peer_id, self.port)
             }
-            TrackerConnection::Dht(dht) => Ok((dht.next().ok_or(bterror!("No dht peers"))?, 30)),
-        })() {
-            Err(e) => {
-                self.next_tracker()?;
-                Err(e)
+            TrackerConnection::Dht(dht) => Ok((
+                dht.next().ok_or(bterror!("No dht peers"))?,
+                DHT_QUERY_INTERVAL,
+            )),
+        }
+    }
+
+    pub fn query(&mut self) -> (Vec<SocketAddr>, u64) {
+        loop {
+            match self._query() {
+                Ok(tracker_info) => return tracker_info,
+                Err(err) => {
+                    println!("Error querying tracker: {}", err);
+                    self.cycle_trackers();
+                }
             }
-            x => x,
         }
     }
 }

@@ -6,12 +6,10 @@ use std::{
     time::Duration,
 };
 
-use crate::{error::BitTorrentError, util::timestr, tracker::multimodal::Tracker};
+use crate::{error::BitTorrentError, tracker::multimodal::Tracker, util::timestr};
 
 use super::{Config, Corkboard, Peer, PeerState};
 
-/// time before retrying after a failed tracker query
-const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 /// maximum duration in between tracker queries
 const MAX_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
@@ -32,45 +30,40 @@ pub fn watchdog(
     loop {
         // update peer information
         log(format!("Querying peer source"));
-        let interval = match tracker.query() {
-            Ok((mut peers, interval)) => {
-                println!("{}", format!("Found {} peers", peers.len()));
-                corkboard
-                    .write()
-                    .map(|mut board| {
-                        board.peers.iter_mut().for_each(|(address, peer)| {
-                            match peers
-                                .iter()
-                                .enumerate()
-                                .find(|(_, peer)| *peer == address)
-                                .map(|(i, _)| i)
-                            {
-                                Some(i) => {
-                                    peers.remove(i);
-                                    peer.connection_attempts = 0;
-                                    if !matches!(
-                                        peer.state,
-                                        PeerState::Error
-                                            | PeerState::Active(true)
-                                            | PeerState::Connecting
-                                    ) {
-                                        peer.state = PeerState::Fresh;
-                                    }
+        let interval = {
+            let (mut peers, interval) = tracker.query();
+            println!("{}", format!("Found {} peers", peers.len()));
+            corkboard
+                .write()
+                .map(|mut board| {
+                    board.peers.iter_mut().for_each(|(address, peer)| {
+                        match peers
+                            .iter()
+                            .enumerate()
+                            .find(|(_, peer)| *peer == address)
+                            .map(|(i, _)| i)
+                        {
+                            Some(i) => {
+                                peers.remove(i);
+                                peer.connection_attempts = 0;
+                                if !matches!(
+                                    peer.state,
+                                    PeerState::Error
+                                        | PeerState::Active(true)
+                                        | PeerState::Connecting
+                                ) {
+                                    peer.state = PeerState::Fresh;
                                 }
-                                None => (),
                             }
-                        });
-                        board
-                            .peers
-                            .extend(peers.into_iter().map(|address| (address, Peer::new())));
-                    })
-                    .unwrap();
-                Duration::from_secs(interval).min(MAX_INTERVAL)
-            }
-            Err(err) => {
-                println!("{}", format!("Error querying tracker: {}", err));
-                RETRY_INTERVAL
-            }
+                            None => (),
+                        }
+                    });
+                    board
+                        .peers
+                        .extend(peers.into_iter().map(|address| (address, Peer::new())));
+                })
+                .unwrap();
+            Duration::from_secs(interval).min(MAX_INTERVAL)
         };
 
         // wait on watchdog alarm

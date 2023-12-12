@@ -1,6 +1,7 @@
 use std::array::TryFromSliceError;
 use std::error::Error;
 use std::fmt::Display;
+use std::string::FromUtf8Error;
 use std::sync::PoisonError;
 
 use hex::FromHexError;
@@ -44,38 +45,25 @@ impl From<anyhow::Error> for BitTorrentError {
     }
 }
 
-impl From<std::io::Error> for BitTorrentError {
-    fn from(value: std::io::Error) -> Self {
-        BitTorrentError::new(value.to_string())
-    }
+macro_rules! from_err {
+    ($err_type:ty) => {
+        impl From<$err_type> for BitTorrentError {
+            fn from(value: $err_type) -> Self {
+                BitTorrentError::new(value.to_string())
+            }
+        }
+    };
 }
 
-impl From<serde_json::Error> for BitTorrentError {
-    fn from(value: serde_json::Error) -> Self {
-        BitTorrentError::new(value.to_string())
-    }
-}
+from_err!(std::io::Error);
+from_err!(serde_json::Error);
+from_err!(TryFromSliceError);
+from_err!(FromHexError);
+from_err!(multihash::Error);
+from_err!(FromUtf8Error);
 
 impl<T> From<PoisonError<T>> for BitTorrentError {
     fn from(value: PoisonError<T>) -> Self {
-        BitTorrentError::new(value.to_string())
-    }
-}
-
-impl From<TryFromSliceError> for BitTorrentError {
-    fn from(value: TryFromSliceError) -> Self {
-        BitTorrentError::new(value.to_string())
-    }
-}
-
-impl From<FromHexError> for BitTorrentError {
-    fn from(value: FromHexError) -> Self {
-        BitTorrentError::new(value.to_string())
-    }
-}
-
-impl From<multihash::Error> for BitTorrentError {
-    fn from(value: multihash::Error) -> Self {
         BitTorrentError::new(value.to_string())
     }
 }

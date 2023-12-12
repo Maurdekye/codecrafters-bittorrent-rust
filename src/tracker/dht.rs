@@ -1,9 +1,10 @@
+#![allow(unused)]
 use std::{collections::VecDeque, fs::File, net::SocketAddr};
 
 use lazy_static::lazy_static;
 use serde::Deserialize;
 
-use crate::{magnet::Magnet, torrent_source::TorrentSource};
+use crate::torrent_source::TorrentSource;
 
 lazy_static! {
     pub static ref BOOTSTRAP_DHT_NODES: Vec<Node> =
