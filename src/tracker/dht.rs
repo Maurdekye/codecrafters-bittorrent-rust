@@ -20,7 +20,7 @@ use crate::{
     list,
     peer::message::Codec,
     torrent_source::TorrentSource,
-    types::{Bytes, PullBytes},
+    types::{Bytes, PullBytes}, util::read_datagram,
 };
 
 lazy_static! {
@@ -34,9 +34,9 @@ pub struct Node {
     address: SocketAddr,
 }
 
-impl Into<Vec<Node>> for Bytes {
-    fn into(self) -> Vec<Node> {
-        self.chunks(26)
+impl From<Bytes> for Vec<Node> {
+    fn from(val: Bytes) -> Self {
+        val.chunks(26)
             .map(|chunk| Node {
                 id: Some(chunk[0..20].try_into().unwrap()),
                 address: Bytes(chunk[20..26].to_vec()).into(),
@@ -45,10 +45,10 @@ impl Into<Vec<Node>> for Bytes {
     }
 }
 
-impl Into<Bytes> for Vec<Node> {
-    fn into(self) -> Bytes {
+impl From<Vec<Node>> for Bytes {
+    fn from(val: Vec<Node>) -> Self {
         Bytes(
-            self.into_iter()
+            val.into_iter()
                 .map(|node| {
                     node.id
                         .unwrap()
@@ -88,6 +88,15 @@ impl Dht {
         dht.socket.set_read_timeout(Some(Duration::from_secs(20)));
         dht
     }
+
+    pub fn exchange_message(&mut self, node: &Node, message: Message) -> Result<Message, BitTorrentError> {
+        let bencoded_message: BencodedValue = message.into();
+        let byte_encoded: Vec<u8> = bencoded_message.encode()?;
+        self.socket.send_to(&byte_encoded[..], node.address);
+
+        let response_bytes = read_datagram(&mut self.socket)?;
+        BencodedValue::ingest(&mut &response_bytes[..])?.into()
+    }
 }
 
 impl Iterator for Dht {
@@ -115,16 +124,16 @@ impl Iterator for Dht {
 }
 
 #[derive(Debug, Clone)]
-struct Message {
-    transaction_id: Bytes,
-    message: MessageType,
+pub struct Message {
+    pub transaction_id: Bytes,
+    pub message: MessageType,
 }
 
-impl Into<BencodedValue> for Message {
-    fn into(self) -> BencodedValue {
-        match self.message {
+impl From<Message> for BencodedValue {
+    fn from(value: Message) -> Self {
+        match value.message {
             MessageType::Query(query) => dict! {
-                b"t" => self.transaction_id,
+                b"t" => value.transaction_id,
                 b"y" => bytes!(b"q"),
                 b"q" => match query {
                     Query::Ping { .. } => bytes!(b"ping"),
@@ -161,7 +170,7 @@ impl Into<BencodedValue> for Message {
                 }
             },
             MessageType::Response(response) => dict! {
-                b"t" => self.transaction_id,
+                b"t" => value.transaction_id,
                 b"y" => bytes!(b"r"),
                 b"r" => match response {
                     Response::Ping { id } => dict! {
@@ -186,7 +195,7 @@ impl Into<BencodedValue> for Message {
                 }
             },
             MessageType::Error(code, error) => dict! {
-                b"t" => self.transaction_id,
+                b"t" => value.transaction_id,
                 b"y" => bytes!(b"e"),
                 b"e" => list! { code as Number, Bytes::from(error) }
             },
@@ -344,14 +353,14 @@ impl From<BencodedValue> for Result<Message, BitTorrentError> {
 }
 
 #[derive(Debug, Clone)]
-enum MessageType {
+pub enum MessageType {
     Query(Query),
     Response(Response),
     Error(usize, String),
 }
 
 #[derive(Debug, Clone)]
-enum Query {
+pub enum Query {
     Ping {
         id: Bytes,
     },
@@ -372,7 +381,7 @@ enum Query {
 }
 
 #[derive(Debug, Clone)]
-enum Response {
+pub enum Response {
     Ping {
         id: Bytes,
     },
@@ -388,7 +397,7 @@ enum Response {
 }
 
 #[derive(Debug, Clone)]
-enum GetPeersReturnData {
+pub enum GetPeersReturnData {
     Nodes(Vec<Node>),
     Peers(Vec<SocketAddr>),
 }

@@ -73,10 +73,10 @@ impl From<SocketAddrV4> for Bytes {
     }
 }
 
-impl Into<SocketAddrV4> for Bytes {
-    fn into(self) -> SocketAddrV4 {
-        let ip = u32::from_be_bytes(self[0..4].try_into().unwrap());
-        let port = u16::from_be_bytes(self[4..6].try_into().unwrap());
+impl From<Bytes> for SocketAddrV4 {
+    fn from(val: Bytes) -> Self {
+        let ip = u32::from_be_bytes(val[0..4].try_into().unwrap());
+        let port = u16::from_be_bytes(val[4..6].try_into().unwrap());
         SocketAddrV4::new(ip.into(), port)
     }
 }
@@ -95,10 +95,10 @@ impl From<SocketAddrV6> for Bytes {
     }
 }
 
-impl Into<SocketAddrV6> for Bytes {
-    fn into(self) -> SocketAddrV6 {
-        let ip = u128::from_be_bytes(self[0..16].try_into().unwrap());
-        let port = u16::from_be_bytes(self[16..18].try_into().unwrap());
+impl From<Bytes> for SocketAddrV6 {
+    fn from(val: Bytes) -> Self {
+        let ip = u128::from_be_bytes(val[0..16].try_into().unwrap());
+        let port = u16::from_be_bytes(val[16..18].try_into().unwrap());
         SocketAddrV6::new(ip.into(), port, 0, 0)
     }
 }
@@ -112,11 +112,11 @@ impl From<SocketAddr> for Bytes {
     }
 }
 
-impl Into<SocketAddr> for Bytes {
-    fn into(self) -> SocketAddr {
-        match self.len() {
-            4 => SocketAddr::V4(Into::<SocketAddrV4>::into(self)),
-            16 => SocketAddr::V6(Into::<SocketAddrV6>::into(self)),
+impl From<Bytes> for SocketAddr {
+    fn from(val: Bytes) -> Self {
+        match val.len() {
+            4 => SocketAddr::V4(Into::<SocketAddrV4>::into(val)),
+            16 => SocketAddr::V6(Into::<SocketAddrV6>::into(val)),
             _ => panic!("Invalid socket address"),
         }
     }

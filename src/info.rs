@@ -18,9 +18,9 @@ pub struct MetaInfo {
     pub info: Info,
 }
 
-impl Into<BencodedValue> for MetaInfo {
-    fn into(self) -> BencodedValue {
-        let (announce, announce_list): (Option<&String>, Option<&[String]>) = self
+impl From<MetaInfo> for BencodedValue {
+    fn from(val: MetaInfo) -> Self {
+        let (announce, announce_list): (Option<&String>, Option<&[String]>) = val
             .announce_list
             .split_first()
             .map(|(x, y)| (Some(x), Some(y)))
@@ -33,7 +33,7 @@ impl Into<BencodedValue> for MetaInfo {
                 .map(|v| v
                     .into_iter()
                     .map(|s| BencodedValue::List(vec![BencodedValue::Bytes(Bytes::from(s.clone()))])).collect::<Vec<_>>()),
-            b"info" => self.info,
+            b"info" => val.info,
         }
     }
 }
@@ -77,20 +77,18 @@ pub struct Info {
     pub file_info: FileInfo,
 }
 
-impl Info {}
-
-impl Into<BencodedValue> for Info {
-    fn into(self) -> BencodedValue {
-        match self.file_info {
+impl From<Info> for BencodedValue {
+    fn from(val: Info) -> Self {
+        match val.file_info {
             FileInfo::Length(length) => dict! {
-                b"name" => Bytes::from(self.name),
-                b"pieces" => Bytes(self.pieces.into_iter().flatten().collect()),
-                b"piece length" => self.piece_length as Number,
+                b"name" => Bytes::from(val.name),
+                b"pieces" => Bytes(val.pieces.into_iter().flatten().collect()),
+                b"piece length" => val.piece_length as Number,
                 b"length" => length as Number,
             },
             FileInfo::Files(files) => dict! {
-                b"name" => Bytes::from(self.name),
-                b"piece length" => self.piece_length as Number,
+                b"name" => Bytes::from(val.name),
+                b"piece length" => val.piece_length as Number,
                 b"files" => files.into_iter().map(|file| dict! {
                     b"length" => file.length as Number,
                     b"path" => file.path.into_iter().map(Bytes::from).collect::<Vec<_>>(),

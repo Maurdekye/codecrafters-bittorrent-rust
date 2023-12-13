@@ -129,17 +129,17 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
     }
 }
 
-impl Into<BencodedValue> for ExtensionHandshake {
-    fn into(self) -> BencodedValue {
+impl From<ExtensionHandshake> for BencodedValue {
+    fn from(val: ExtensionHandshake) -> Self {
         dict! {
-            b"m" => self.messages,
-            b"p" => self.port.map(|x| x as Number),
-            b"v" => self.version,
-            b"yourip" => self.yourip.map(Into::<Bytes>::into),
-            b"ipv6" => self.ipv6.map(Into::<Bytes>::into),
-            b"ipv4" => self.ipv4.map(Into::<Bytes>::into),
-            b"reqq" => self.reqq,
-            b"metadata_size" => self.metadata_size,
+            b"m" => val.messages,
+            b"p" => val.port.map(|x| x as Number),
+            b"v" => val.version,
+            b"yourip" => val.yourip.map(Into::<Bytes>::into),
+            b"ipv6" => val.ipv6.map(Into::<Bytes>::into),
+            b"ipv4" => val.ipv4.map(Into::<Bytes>::into),
+            b"reqq" => val.reqq,
+            b"metadata_size" => val.metadata_size,
         }
     }
 }
@@ -175,12 +175,12 @@ impl From<BencodedValue> for Result<ExtensionMetadata, BitTorrentError> {
     }
 }
 
-impl Into<BencodedValue> for ExtensionMetadata {
-    fn into(self) -> BencodedValue {
+impl From<ExtensionMetadata> for BencodedValue {
+    fn from(val: ExtensionMetadata) -> Self {
         dict! {
-            b"msg_type" => self.msg_type,
-            b"piece" => self.piece,
-            b"total_size" => self.total_size,
+            b"msg_type" => val.msg_type,
+            b"piece" => val.piece,
+            b"total_size" => val.total_size,
         }
     }
 }
