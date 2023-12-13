@@ -209,12 +209,7 @@ fn peer_validator(val: &str) -> Result<SocketAddr, String> {
 }
 
 fn main() -> Result<(), BitTorrentError> {
-    // let args = Args::parse();
-    let args = Args::parse_from([
-        "_",
-        "dht-query",
-        "magnet:?xt=urn:btih:5B390BF4EA76337467B2D3F5B9EB81F1A7E35F6A",
-    ]);
+    let args = Args::parse();
 
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
