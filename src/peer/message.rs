@@ -6,7 +6,7 @@ use std::ops::Deref;
 use crate::bencode::{BencodedValue, Number};
 use crate::dict;
 use crate::torrent_source::TorrentSource;
-use crate::types::Bytes;
+use crate::types::{Bytes, PullBytes};
 use crate::{
     bterror, bytes,
     error::BitTorrentError,
@@ -92,7 +92,7 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
         if let BencodedValue::Dict(mut handshake) = value {
             Ok(ExtensionHandshake {
                 messages: handshake
-                    .remove(&bytes!(b"m"))
+                    .pull(b"m")
                     .and_then(BencodedValue::into_dict)
                     .and_then(|map| {
                         let map = map
@@ -102,29 +102,25 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
                         map.is_empty().then_some(map)
                     }),
                 port: handshake
-                    .remove(&bytes!(b"p"))
+                    .pull(b"p")
                     .and_then(BencodedValue::into_int)
                     .map(|inner| inner as u16),
-                version: handshake
-                    .remove(&bytes!(b"v"))
-                    .and_then(BencodedValue::into_bytes),
+                version: handshake.pull(b"v").and_then(BencodedValue::into_bytes),
                 yourip: handshake
-                    .remove(&bytes!(b"yourip"))
+                    .pull(b"yourip")
                     .and_then(BencodedValue::into_bytes)
                     .map(Into::into),
                 ipv6: handshake
-                    .remove(&bytes!(b"ipv6"))
+                    .pull(b"ipv6")
                     .and_then(BencodedValue::into_bytes)
                     .map(Into::into),
                 ipv4: handshake
-                    .remove(&bytes!(b"ipv4"))
+                    .pull(b"ipv4")
                     .and_then(BencodedValue::into_bytes)
                     .map(Into::into),
-                reqq: handshake
-                    .remove(&bytes!(b"reqq"))
-                    .and_then(BencodedValue::into_int),
+                reqq: handshake.pull(b"reqq").and_then(BencodedValue::into_int),
                 metadata_size: handshake
-                    .remove(&bytes!(b"metadata_size"))
+                    .pull(b"metadata_size")
                     .and_then(BencodedValue::into_int),
             })
         } else {
@@ -160,17 +156,17 @@ impl From<BencodedValue> for Result<ExtensionMetadata, BitTorrentError> {
         if let BencodedValue::Dict(mut metadata) = value {
             Ok(ExtensionMetadata {
                 msg_type: metadata
-                    .remove(&bytes!(b"msg_type"))
+                    .pull(b"msg_type")
                     .and_then(BencodedValue::into_int)
                     .ok_or(bterror!("msg_type missing"))?
                     .into(),
                 piece: metadata
-                    .remove(&bytes!(b"piece"))
+                    .pull(b"piece")
                     .and_then(BencodedValue::into_int)
                     .ok_or(bterror!("piece missing"))?
                     .into(),
                 total_size: metadata
-                    .remove(&bytes!(b"total_size"))
+                    .pull(b"total_size")
                     .and_then(BencodedValue::into_int),
             })
         } else {

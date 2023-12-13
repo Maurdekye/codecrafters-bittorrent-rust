@@ -1,11 +1,11 @@
-use std::net::SocketAddr;
 use crate::{
     bencode::{BencodedValue, Number},
-    bterror, bytes,
+    bterror,
     error::BitTorrentError,
     peer::message::Codec,
-    types::Bytes,
+    types::{Bytes, PullBytes},
 };
+use std::net::SocketAddr;
 
 pub mod dht;
 pub mod multimodal;
@@ -23,16 +23,16 @@ pub enum TrackerResponse {
 impl From<BencodedValue> for Result<TrackerResponse, BitTorrentError> {
     fn from(value: BencodedValue) -> Self {
         if let BencodedValue::Dict(mut response) = value {
-            if let Some(BencodedValue::Bytes(peers)) = response.remove(&bytes!(b"peers")) {
+            if let Some(BencodedValue::Bytes(peers)) = response.pull(b"peers") {
                 Ok(TrackerResponse::Success {
                     interval: response
-                        .remove(&bytes!(b"interval"))
+                        .pull(b"interval")
                         .and_then(BencodedValue::into_int)
                         .ok_or(bterror!("Interval missing"))?,
                     peers: <Vec<SocketAddr>>::decode(&mut &peers[..])?,
                 })
             } else if let Some(BencodedValue::Bytes(failure_reason)) =
-                response.remove(&bytes!(b"failure reason"))
+                response.pull(b"failure reason")
             {
                 Ok(TrackerResponse::Failure { failure_reason })
             } else {

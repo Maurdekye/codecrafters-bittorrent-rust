@@ -5,9 +5,9 @@ use std::{
 
 use crate::{
     bencode::{BencodedValue, Number},
-    bterror, bytes, dict,
+    bterror, dict,
     error::BitTorrentError,
-    types::Bytes,
+    types::{Bytes, PullBytes},
     util::sha1_hash,
 };
 use anyhow::Context;
@@ -43,12 +43,12 @@ impl From<BencodedValue> for Result<MetaInfo, BitTorrentError> {
         if let BencodedValue::Dict(mut meta_info) = value {
             Ok(MetaInfo {
                 announce_list: meta_info
-                    .remove(&bytes!(b"announce"))
+                    .pull(b"announce")
                     .and_then(BencodedValue::into_bytes)
                     .into_iter()
                     .chain(
                         meta_info
-                            .remove(&bytes!(b"announce-list"))
+                            .pull(b"announce-list")
                             .and_then(BencodedValue::into_list)
                             .unwrap_or_default()
                             .into_iter()
@@ -59,7 +59,7 @@ impl From<BencodedValue> for Result<MetaInfo, BitTorrentError> {
                     .map(Bytes::into_string)
                     .collect(),
                 info: meta_info
-                    .remove(&bytes!(b"info"))
+                    .pull(b"info")
                     .ok_or(bterror!("Missing info"))
                     .and_then(<Result<_, _>>::from)?,
             })
@@ -105,27 +105,27 @@ impl From<BencodedValue> for Result<Info, BitTorrentError> {
         if let BencodedValue::Dict(mut info) = value {
             Ok(Info {
                 name: info
-                    .remove(&bytes!(b"name"))
+                    .pull(b"name")
                     .and_then(BencodedValue::into_bytes)
                     .map(Bytes::into_string)
                     .ok_or(bterror!("Missing name"))?,
                 piece_length: info
-                    .remove(&bytes!(b"piece length"))
+                    .pull(b"piece length")
                     .and_then(BencodedValue::into_int)
                     .ok_or(bterror!("Missing piece length"))?
                     .try_into()?,
                 pieces: info
-                    .remove(&bytes!(b"pieces"))
+                    .pull(b"pieces")
                     .and_then(BencodedValue::into_bytes)
                     .map(|value| value.chunks(20).filter_map(|x| x.try_into().ok()).collect())
                     .ok_or(bterror!("Missing pieces"))?,
                 file_info: match info
-                    .remove(&bytes!(b"length"))
+                    .pull(b"length")
                     .and_then(BencodedValue::into_int)
                 {
                     Some(length) => FileInfo::Length(length as usize),
                     None => FileInfo::Files(
-                        info.remove(&bytes!(b"files"))
+                        info.pull(b"files")
                             .and_then(BencodedValue::into_list)
                             .map(|files| {
                                 files
@@ -134,12 +134,12 @@ impl From<BencodedValue> for Result<Info, BitTorrentError> {
                                     .map(|mut file| {
                                         Ok::<_, BitTorrentError>(File {
                                             length: file
-                                                .remove(&bytes!(b"length"))
+                                                .pull(b"length")
                                                 .and_then(BencodedValue::into_int)
                                                 .ok_or(bterror!("Missing length"))?
                                                 as usize,
                                             path: file
-                                                .remove(&bytes!(b"path"))
+                                                .pull(b"path")
                                                 .and_then(BencodedValue::into_list)
                                                 .map(|path| {
                                                     path.into_iter()

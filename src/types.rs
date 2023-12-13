@@ -2,7 +2,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     ops::{Deref, DerefMut},
-    vec,
+    vec, collections::HashMap,
 };
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -151,5 +151,15 @@ impl Debug for Bytes {
 impl Display for Bytes {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_string())
+    }
+}
+
+pub trait PullBytes<T> {
+    fn pull(&mut self, key: &[u8]) -> Option<T>;
+}
+
+impl<T> PullBytes<T> for HashMap<Bytes, T> {
+    fn pull(&mut self, key: &[u8]) -> Option<T> {
+        self.remove(&bytes!(key))
     }
 }
