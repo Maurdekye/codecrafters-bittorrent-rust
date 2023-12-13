@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt::Display,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
@@ -12,16 +12,15 @@ use std::{
 
 use anyhow::Context;
 use lazy_static::lazy_static;
-use serde_json::{Map, Number, Value};
 use std::default::Default;
 
 use crate::{
-    bencode::decode::{consume_bencoded_value, decode_maybe_b64_string},
-    bterror,
+    bencode::{BencodedValue, Number},
+    bterror, bytes,
     error::BitTorrentError,
     info::MetaInfo,
-    info_field,
     torrent_source::TorrentSource,
+    types::Bytes,
     util::{bytes_to_hex, cap_length, sha1_hash, timestr},
 };
 
@@ -44,9 +43,9 @@ const TCP_READWRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// maximum number of allowed rejections before the peer is disconnected
 const MAX_REJECTIONS: usize = 64;
 /// supported extension message codes
-const EXTENSION_CONFIG: &[(&str, u8)] = &[
+const EXTENSION_CONFIG: &[(&[u8], u8)] = &[
     // ("ut_pex", 1),
-    ("ut_metadata", 2),
+    (b"ut_metadata", 2),
     // ("upload_only", 3),
     // ("ut_holepunch", 4),
     // ("lt_donthave", 7),
@@ -54,14 +53,14 @@ const EXTENSION_CONFIG: &[(&str, u8)] = &[
 ];
 
 lazy_static! {
-    pub static ref CODEC_EXTENSION_CONFIG: Vec<(String, u8)> = EXTENSION_CONFIG
+    pub static ref CODEC_EXTENSION_CONFIG: Vec<(Bytes, Number)> = EXTENSION_CONFIG
         .iter()
-        .map(|(s, v)| (s.to_string(), *v))
+        .map(|(k, v)| (Bytes::from(*k), *v as Number))
         .collect::<Vec<_>>();
-    pub static ref HANDSHAKE_EXTENSION_CONFIG: Map<String, Value> = EXTENSION_CONFIG
+    pub static ref HANDSHAKE_EXTENSION_CONFIG: HashMap<Bytes, Number> = CODEC_EXTENSION_CONFIG
         .iter()
-        .map(|(k, v)| (k.to_string(), Value::Number(Number::from(*v))))
-        .collect();
+        .cloned()
+        .collect::<HashMap<_, _>>();
 }
 
 #[derive(Debug)]
@@ -111,7 +110,7 @@ impl TcpPeer {
     pub fn send_peer_message(&mut self, message: PeerMessage) -> Result<(), BitTorrentError> {
         self.log(format!(">...> {:?}", message));
         self.stream
-            .write(&self.encoder.encode(&message)?)
+            .write(&self.encoder.encode(message)?)
             .with_context(|| "Error sending peer message")?;
         self.log(">>>>>");
         Ok(())
@@ -244,26 +243,9 @@ impl PeerConnection for TcpPeer {
                     connection.send_peer_message(PeerMessage::Extension(
                         ExtensionMessage::Handshake(ExtensionHandshake {
                             messages: Some(HANDSHAKE_EXTENSION_CONFIG.clone()),
-                            version: Some("MaurdekyeBitTorrent/1.0.0".to_string()),
-                            yourip: Some(match peer {
-                                SocketAddr::V4(ip) => decode_maybe_b64_string(
-                                    &ip.ip()
-                                        .to_bits()
-                                        .to_be_bytes()
-                                        .into_iter()
-                                        .chain(ip.port().to_be_bytes())
-                                        .collect::<Vec<_>>(),
-                                ),
-                                SocketAddr::V6(ip) => decode_maybe_b64_string(
-                                    &ip.ip()
-                                        .to_bits()
-                                        .to_be_bytes()
-                                        .into_iter()
-                                        .chain(ip.port().to_be_bytes())
-                                        .collect::<Vec<_>>(),
-                                ),
-                            }),
-                            reqq: Some(Number::from(500)),
+                            version: Some(bytes!(b"MaurdekyeBitTorrent/1.0.0")),
+                            yourip: Some(peer.into()),
+                            reqq: Some(500),
                             ..Default::default()
                         }),
                     ))?;
@@ -292,13 +274,13 @@ impl PeerConnection for TcpPeer {
                 )) => {
                     if let (Some(data), Some(total_size)) = (data, total_size) {
                         meta_info_pieces.push(data);
-                        if meta_info_pieces.iter().flatten().count() < total_size {
+                        if meta_info_pieces.iter().flatten().count() < total_size as usize {
                             // not all pieces acquired, ask for more
                             connection.send_peer_message(PeerMessage::Extension(
                                 ExtensionMessage::Metadata(
                                     ExtensionMetadata {
                                         msg_type: 0,
-                                        piece: meta_info_pieces.len(),
+                                        piece: meta_info_pieces.len() as Number,
                                         total_size: None,
                                     },
                                     None,
@@ -346,22 +328,16 @@ impl PeerConnection for TcpPeer {
         // construct meta_info
         let meta_info = match meta_info {
             Some(meta_info) => meta_info,
-            None => {
-                MetaInfo {
-                    announce: None,
-                    announce_list: None,
-                    info: serde_json::from_value(consume_bencoded_value(
-                        &mut &meta_info_pieces
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()[..],
-                    )?)?,
-                }
-            }
+            None => MetaInfo {
+                announce_list: Vec::new(),
+                info: <Result<_, _>>::from(BencodedValue::ingest(
+                    &mut &meta_info_pieces.into_iter().flatten().collect::<Vec<_>>()[..],
+                )?)?,
+            },
         };
 
         if let Some(bitfield_source) = bitfield_source {
-            connection.bitfield = bitfield_source.take(meta_info.num_pieces()).collect();
+            connection.bitfield = bitfield_source.take(meta_info.info.pieces.len()).collect();
             connection.torrent_source = TorrentSource::File(meta_info);
         } else {
             unreachable!()
@@ -375,9 +351,9 @@ impl PeerConnection for TcpPeer {
         let meta_info = self
             .meta_info()
             .ok_or(bterror!("Can't download a file without meta info!"))?;
-        let piece_offset = piece_id * *info_field!(&meta_info.info, piece_length) as u32;
-        let chunk_size = (meta_info.length() as u32 - piece_offset)
-            .min(*info_field!(&meta_info.info, piece_length) as u32);
+        let piece_offset = piece_id * meta_info.info.piece_length as u32;
+        let chunk_size =
+            (meta_info.length() as u32 - piece_offset).min(meta_info.info.piece_length as u32);
 
         let mut chunks = (0..chunk_size)
             .step_by(CHUNK_SIZE as usize)
@@ -440,7 +416,7 @@ impl PeerConnection for TcpPeer {
         let meta_info = self
             .meta_info()
             .ok_or(bterror!("Can't download a file without meta info!"))?;
-        let check_hash = meta_info.pieces()?[piece_id as usize];
+        let check_hash = meta_info.info.pieces[piece_id as usize];
         if hash != check_hash {
             Err(bterror!(
                 "Piece hash mismatch: meta info hash: {}, actual hash: {}",

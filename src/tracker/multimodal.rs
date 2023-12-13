@@ -10,11 +10,12 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{
-    bencode::decode::{consume_bencoded_value, decode_maybe_b64_string},
+    bencode::BencodedValue,
     bterror,
     error::BitTorrentError,
+    peer::message::Codec,
     torrent_source::TorrentSource,
-    tracker::{SuccessfulTrackerResponse, TrackerResponse},
+    tracker::TrackerResponse,
     util::{querystring_encode, read_datagram},
 };
 
@@ -43,7 +44,7 @@ impl Tracker {
     ) -> Result<Tracker, BitTorrentError> {
         let mut trackers: VecDeque<String> = torrent_source.trackers().into();
         Ok(Tracker {
-            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source),
+            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source, &peer_id),
             trackers,
             torrent_source,
             peer_id,
@@ -54,6 +55,7 @@ impl Tracker {
     fn _next_tracker(
         trackers: &mut VecDeque<String>,
         torrent_source: &TorrentSource,
+        peer_id: &String,
     ) -> TrackerConnection {
         loop {
             match trackers.pop_front() {
@@ -61,13 +63,19 @@ impl Tracker {
                     Ok(tracker_connection) => return tracker_connection,
                     Err(err) => println!("Error connecting to tracker at {}: {}", url, err),
                 },
-                None => return TrackerConnection::Dht(Dht::new(torrent_source.clone())),
+                None => {
+                    return TrackerConnection::Dht(Dht::new(
+                        torrent_source.clone(),
+                        peer_id.clone(),
+                    ))
+                }
             }
         }
     }
 
     fn cycle_trackers(&mut self) {
-        self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source);
+        self.active_connection =
+            Tracker::_next_tracker(&mut self.trackers, &self.torrent_source, &self.peer_id);
     }
 
     fn _query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
@@ -112,18 +120,11 @@ impl Tracker {
                     .with_context(|| "Error decoding request response")?
                     .to_vec();
 
-                let tracker_response =
-                    serde_json::from_value(consume_bencoded_value(&mut &raw_body[..])?)
-                        .with_context(|| "Error deserializing tracker response")?;
-
-                match tracker_response {
-                    TrackerResponse::Success(tracker_info) => {
-                        Ok((tracker_info.peers()?, tracker_info.interval))
+                match <Result<_, _>>::from(BencodedValue::ingest(&mut &raw_body[..])?)? {
+                    TrackerResponse::Success { interval, peers } => Ok((peers, interval as u64)),
+                    TrackerResponse::Failure { failure_reason } => {
+                        Err(bterror!("Tracker query failure: {}", failure_reason))
                     }
-                    TrackerResponse::Failure(tracker_info) => Err(bterror!(
-                        "Tracker query failure: {}",
-                        tracker_info.failure_reason
-                    )),
                 }
             }
             TrackerConnection::Udp(udp_connection) => {
@@ -282,9 +283,8 @@ impl UdpTrackerConnection {
         // let leechers = u32::from_be_bytes(response_bytes[12..16].try_into().unwrap());
         // let seeders = u32::from_be_bytes(response_bytes[16..20].try_into().unwrap());
 
-        let peers = decode_maybe_b64_string(&response_bytes[20..]);
-        let tracker_response = SuccessfulTrackerResponse { peers, interval };
+        let peers = <Vec<SocketAddr>>::decode(&mut &response_bytes[20..])?;
 
-        Ok((tracker_response.peers()?, interval))
+        Ok((peers, interval))
     }
 }

@@ -16,10 +16,11 @@ use crate::{
     error::BitTorrentError,
     info::MetaInfo,
     peer::{
-        message::{HandshakeMessage, PeerMessage, PieceMessage, PeerMessageCodec},
+        message::{HandshakeMessage, PeerMessage, PeerMessageCodec, PieceMessage},
         tcp::{TcpPeer, CODEC_EXTENSION_CONFIG},
     },
-    util::timestr, torrent_source::TorrentSource,
+    torrent_source::TorrentSource,
+    util::timestr,
 };
 
 use super::{Config, Corkboard, Piece, PieceState};

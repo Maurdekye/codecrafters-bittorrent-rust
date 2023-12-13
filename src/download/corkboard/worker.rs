@@ -2,13 +2,16 @@ use std::{
     error::Error,
     net::SocketAddr,
     sync::{atomic, Arc, RwLock},
-    time::{SystemTime, Duration}, thread,
+    thread,
+    time::{Duration, SystemTime},
 };
 
 use crate::{
     error::BitTorrentError,
+    info::MetaInfo,
     peer::PeerConnection,
-    util::{sha1_hash, sleep, timestr}, info::MetaInfo, torrent_source::TorrentSource,
+    torrent_source::TorrentSource,
+    util::{sha1_hash, sleep, timestr},
 };
 
 use super::{Benchmark, Config, Corkboard, PeerState, Piece, PieceLocation, PieceState};

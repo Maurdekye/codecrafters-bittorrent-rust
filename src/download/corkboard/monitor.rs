@@ -1,15 +1,30 @@
-use std::{sync::{Arc, RwLock, mpsc::{Receiver, RecvTimeoutError}}, time::Duration};
+use std::{
+    sync::{
+        mpsc::{Receiver, RecvTimeoutError},
+        Arc, RwLock,
+    },
+    time::Duration,
+};
 
-use crate::{error::BitTorrentError, util::timestr, info::MetaInfo};
+use crate::{error::BitTorrentError, info::MetaInfo, util::timestr};
 
-use super::{Corkboard, PeerState, PieceState, Config};
+use super::{Config, Corkboard, PeerState, PieceState};
 
 /// time between reports
 const INTERVAL: Duration = Duration::from_secs(5);
 
 /// Monitor thread: reads out statistics about the current download at regular intervals
-pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, _meta_info: MetaInfo, config: Config) -> Result<(), BitTorrentError> {
-    let log = |msg: String| if config.verbose {println!("[{}][M] {msg}", timestr())};
+pub fn monitor(
+    corkboard: Arc<RwLock<Corkboard>>,
+    alarm: Receiver<()>,
+    _meta_info: MetaInfo,
+    config: Config,
+) -> Result<(), BitTorrentError> {
+    let log = |msg: String| {
+        if config.verbose {
+            println!("[{}][M] {msg}", timestr())
+        }
+    };
 
     log(format!("Monitor init"));
     loop {
@@ -67,7 +82,7 @@ pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, _meta_inf
 
         // wait on alarm
         if matches!(
-            alarm.recv_timeout(INTERVAL), 
+            alarm.recv_timeout(INTERVAL),
             Err(RecvTimeoutError::Disconnected) | Ok(_)
         ) {
             break;
@@ -75,4 +90,4 @@ pub fn monitor(corkboard: Arc<RwLock<Corkboard>>, alarm: Receiver<()>, _meta_inf
     }
 
     Ok(())
-} 
+}

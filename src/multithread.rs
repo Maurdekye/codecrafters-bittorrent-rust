@@ -72,7 +72,9 @@ impl SyncDoor {
         })
     }
 
-    pub fn is_closed(&self) -> Result<bool, std::sync::PoisonError<std::sync::MutexGuard<'_, bool>>> {
+    pub fn is_closed(
+        &self,
+    ) -> Result<bool, std::sync::PoisonError<std::sync::MutexGuard<'_, bool>>> {
         self.lock.lock().map(|lock| *lock)
     }
 }

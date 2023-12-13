@@ -1,95 +1,73 @@
-use std::net::{Ipv4Addr, SocketAddrV4, SocketAddr};
-
-use anyhow::Context;
-use serde::Deserialize;
-
+use std::net::SocketAddr;
 use crate::{
-    bterror, error::BitTorrentError,
-    info::MetaInfo, bencode::{encode::encode_maybe_b64_string, decode::consume_bencoded_value}, util::querystring_encode,
+    bencode::{BencodedValue, Number},
+    bterror, bytes,
+    error::BitTorrentError,
+    peer::message::Codec,
+    types::Bytes,
 };
 
-pub mod multimodal;
 pub mod dht;
+pub mod multimodal;
 
-#[derive(Deserialize)]
-#[serde(untagged)]
 pub enum TrackerResponse {
-    Success(SuccessfulTrackerResponse),
-    Failure(FailureTrackerResponse),
+    Success {
+        interval: Number,
+        peers: Vec<SocketAddr>,
+    },
+    Failure {
+        failure_reason: Bytes,
+    },
 }
 
-#[derive(Deserialize)]
-pub struct SuccessfulTrackerResponse {
-    pub interval: u64,
-    pub peers: String,
-}
-
-#[derive(Deserialize)]
-pub struct FailureTrackerResponse {
-    #[serde(rename = "failure reason")]
-    pub failure_reason: String,
-}
-
-impl SuccessfulTrackerResponse {
-    /// Return the peers as a vector of socket addresses.
-    pub fn peers(&self) -> Result<Vec<SocketAddr>, BitTorrentError> {
-        Ok(encode_maybe_b64_string(&self.peers)?
-            .to_vec()
-            .chunks(6)
-            .map(|chunk| {
-                SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]),
-                    u16::from_be_bytes([chunk[4], chunk[5]]),
-                ))
-            })
-            .collect())
+impl From<BencodedValue> for Result<TrackerResponse, BitTorrentError> {
+    fn from(value: BencodedValue) -> Self {
+        if let BencodedValue::Dict(mut response) = value {
+            if let Some(BencodedValue::Bytes(peers)) = response.remove(&bytes!(b"peers")) {
+                Ok(TrackerResponse::Success {
+                    interval: response
+                        .remove(&bytes!(b"interval"))
+                        .and_then(BencodedValue::into_int)
+                        .ok_or(bterror!("Interval missing"))?,
+                    peers: <Vec<SocketAddr>>::decode(&mut &peers[..])?,
+                })
+            } else if let Some(BencodedValue::Bytes(failure_reason)) =
+                response.remove(&bytes!(b"failure reason"))
+            {
+                Ok(TrackerResponse::Failure { failure_reason })
+            } else {
+                Err(bterror!("Invalid tracker response"))
+            }
+        } else {
+            Err(bterror!("Invalid tracker response"))
+        }
     }
 }
 
-/// Query the tracker for a list of peers for the torrent associated with the `meta_info` object passed.
-/// deprecated; use `multimodal::Tracker` instead 
-#[deprecated = "use `multimodal::Tracker` instead"]
-#[allow(unused)]
-pub fn query_tracker(
-    meta_info: &MetaInfo,
-    peer_id: &str,
-    port: u16,
-) -> Result<SuccessfulTrackerResponse, BitTorrentError> {
-    let client = reqwest::blocking::Client::new();
+impl Codec for Vec<SocketAddr> {
+    type Error = BitTorrentError;
 
-    let raw_body = client
-        .get(format!(
-            "{}?{}",
-            meta_info.preferred_tracker(),
-            [
-                ("info_hash", querystring_encode(&meta_info.info_hash()?)),
-                ("peer_id", peer_id.to_string()),
-                ("port", format!("{}", port)),
-                ("uploaded", "0".to_string()),
-                ("downloaded", "0".to_string()),
-                ("left", format!("{}", meta_info.length())),
-                ("compact", "1".to_string()),
-            ]
+    fn encode(self) -> Result<Vec<u8>, Self::Error> {
+        Ok(self
             .into_iter()
-            .map(|(key, value)| format!("{}={}", key, value))
-            .collect::<Vec<_>>()
-            .join("&")
-        ))
-        .send()
-        .with_context(|| "Error making request to tracker url")?
-        .bytes()
-        .with_context(|| "Error decoding request response")?
-        .to_vec();
+            .map(|socket| match socket {
+                SocketAddr::V4(socket) => Bytes::from(socket),
+                SocketAddr::V6(socket) => Bytes::from(socket),
+            })
+            .flatten()
+            .collect())
+    }
 
-    let tracker_response =
-        serde_json::from_value(consume_bencoded_value(&mut &raw_body[..])?)
-            .with_context(|| "Error deserializing tracker response")?;
-
-    match tracker_response {
-        TrackerResponse::Success(tracker_info) => Ok(tracker_info),
-        TrackerResponse::Failure(tracker_info) => Err(bterror!(
-            "Tracker query failure: {}",
-            tracker_info.failure_reason
-        )),
+    /// only decodes ipv4 sockets
+    fn decode(bytes: &[u8]) -> Result<Self, Self::Error>
+    where
+        Self: Sized,
+    {
+        Ok(bytes
+            .chunks(6)
+            .map(Bytes::from)
+            .map(Into::into)
+            .map(SocketAddr::V4)
+            .collect())
     }
 }

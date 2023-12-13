@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    net::{SocketAddr, TcpStream},
+    net::{AddrParseError, SocketAddr, TcpStream},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
@@ -12,18 +12,18 @@ use anyhow::Context;
 use clap::{ArgAction, Parser};
 use download::download_piece_from_peer;
 use error::BitTorrentError;
-use tracker::multimodal::Tracker;
-use util::parse_socket_addr;
+use tracker::{dht::Dht, multimodal::Tracker};
 
 use crate::{
-    bencode::decode::consume_bencoded_value,
+    bencode::BencodedValue,
     download::{
         corkboard::{corkboard_download, Config},
         download_file,
     },
     info::MetaInfo,
-    peer::{tcp::TcpPeer, message::PeerMessageCodec},
-    util::bytes_to_hex, torrent_source::TorrentSource,
+    peer::{message::PeerMessageCodec, tcp::TcpPeer},
+    torrent_source::TorrentSource,
+    util::bytes_to_hex,
 };
 
 mod bencode;
@@ -35,6 +35,7 @@ mod multithread;
 mod peer;
 mod torrent_source;
 mod tracker;
+mod types;
 mod util;
 
 /// Rust BitTorrent Downloader
@@ -51,6 +52,7 @@ enum Subcommand {
     DecodeHex(DecodeHexArgs),
     Info(InfoArgs),
     Peers(PeersArgs),
+    DhtQuery(DhtQueryArgs),
     Handshake(HandshakeArgs),
     #[command(name = "download_piece")]
     DownloadPiece(DownloadPieceArgs),
@@ -81,6 +83,21 @@ struct InfoArgs {
 
 #[derive(Parser)]
 struct PeersArgs {
+    /// File with torrent information
+    #[arg(required = true)]
+    torrent_source: String,
+
+    /// Peer ID for GET request
+    #[arg(short, long, default_value = "00112233445566778899")]
+    peer_id: String,
+
+    /// Port for GET request
+    #[arg(short = 't', long, default_value_t = 6881)]
+    port: u16,
+}
+
+#[derive(Parser)]
+struct DhtQueryArgs {
     /// File with torrent information
     #[arg(required = true)]
     torrent_source: String,
@@ -188,41 +205,43 @@ fn pathbuf_parse(val: &str) -> Result<PathBuf, String> {
 
 /// Validate peer ip:port format.
 fn peer_validator(val: &str) -> Result<SocketAddr, String> {
-    parse_socket_addr(val).map_err(|err| err.to_string())
+    val.parse().map_err(|err: AddrParseError| err.to_string())
 }
 
 fn main() -> Result<(), BitTorrentError> {
-    let args = Args::parse();
-    
+    // let args = Args::parse();
+    let args = Args::parse_from([
+        "_",
+        "dht-query",
+        "magnet:?xt=urn:btih:5B390BF4EA76337467B2D3F5B9EB81F1A7E35F6A",
+    ]);
+
     match args.subcommand {
         Subcommand::Decode(decode_args) => {
             let mut content = decode_args.raw_content.as_bytes();
-            let decoded = consume_bencoded_value(&mut content)?;
+            let decoded: BencodedValue = BencodedValue::ingest(&mut content)?;
             println!("{}", decoded);
         }
         Subcommand::DecodeHex(decode_args) => {
             let content = hex::decode(decode_args.raw_content)?;
             let mut cslice = &content[..];
             while cslice.len() > 0 {
-                let decoded = consume_bencoded_value(&mut cslice)?;
+                let decoded = BencodedValue::ingest(&mut cslice)?;
                 println!("{:#?}", decoded);
             }
         }
         Subcommand::Info(info_args) => {
             let content = fs::read(&info_args.torrent_file)?;
-            let decoded_value = consume_bencoded_value(&mut &content[..])?;
+            let decoded_value = BencodedValue::ingest(&mut &content[..])?;
             println!("{:#?}", decoded_value);
             let meta_info = MetaInfo::from_file(&info_args.torrent_file)?;
             let info_hash = meta_info.info_hash()?;
-            println!("Tracker URL: {}", meta_info.preferred_tracker());
+            println!("Tracker URL: {}", meta_info.announce_list.first().unwrap());
             println!("Length: {}", meta_info.length());
             println!("Info Hash: {}", bytes_to_hex(&info_hash));
-            println!(
-                "Piece Length: {}",
-                info_field!(&meta_info.info, piece_length)
-            );
+            println!("Piece Length: {}", meta_info.info.pieces.len());
             println!("Piece Hashes:");
-            for hash in meta_info.pieces()? {
+            for hash in meta_info.info.pieces {
                 println!("{}", bytes_to_hex(&hash));
             }
         }
@@ -232,6 +251,16 @@ fn main() -> Result<(), BitTorrentError> {
             let (peers, _) = tracker.query();
             for sock in peers {
                 println!("{}", sock);
+            }
+        }
+        Subcommand::DhtQuery(dht_query_args) => {
+            let torrent_source = TorrentSource::from_string(&dht_query_args.torrent_source)?;
+            let mut dht = Dht::new(torrent_source, dht_query_args.peer_id);
+            let peers = dht.next();
+            if let Some(peers) = peers {
+                for sock in peers {
+                    println!("{}", sock);
+                }
             }
         }
         Subcommand::Handshake(handshake_args) => {

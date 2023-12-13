@@ -28,7 +28,13 @@ pub struct Corkboard {
 impl Corkboard {
     pub fn new(meta_info: MetaInfo) -> Result<Self, BitTorrentError> {
         Ok(Self {
-            pieces: meta_info.pieces()?.into_iter().map(Piece::new).collect(),
+            pieces: meta_info
+                .info
+                .pieces
+                .iter()
+                .cloned()
+                .map(Piece::new)
+                .collect(),
             peers: HashMap::new(),
             finishing: Arc::new(AtomicBool::new(false)),
             meta_info,
@@ -200,7 +206,7 @@ pub fn corkboard_download<T: PeerConnection>(
                         }
                         Err(err) => {
                             log(format!("[{}] Disconnected from peer: {}", peer, err));
-                        },
+                        }
                     }
                 }
             })()?

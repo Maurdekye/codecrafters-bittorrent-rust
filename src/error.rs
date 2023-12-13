@@ -1,11 +1,11 @@
 use std::array::TryFromSliceError;
 use std::error::Error;
 use std::fmt::Display;
+use std::num::{ParseIntError, TryFromIntError};
 use std::string::FromUtf8Error;
 use std::sync::PoisonError;
 
 use hex::FromHexError;
-
 
 #[macro_export]
 macro_rules! bterror {
@@ -61,6 +61,8 @@ from_err!(TryFromSliceError);
 from_err!(FromHexError);
 from_err!(multihash::Error);
 from_err!(FromUtf8Error);
+from_err!(ParseIntError);
+from_err!(TryFromIntError);
 
 impl<T> From<PoisonError<T>> for BitTorrentError {
     fn from(value: PoisonError<T>) -> Self {

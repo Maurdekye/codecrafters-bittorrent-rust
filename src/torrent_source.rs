@@ -1,7 +1,5 @@
-use std::iter::once;
-
 use crate::{
-    error::BitTorrentError, info::MetaInfo, info_field, magnet::Magnet, util::bytes_to_hex,
+    error::BitTorrentError, info::MetaInfo, magnet::Magnet, util::bytes_to_hex,
 };
 
 #[derive(Debug, Clone)]
@@ -27,24 +25,14 @@ impl TorrentSource {
 
     pub fn trackers(&self) -> Vec<String> {
         match self {
-            TorrentSource::File(meta_info) => once(meta_info.announce.clone())
-                .chain(
-                    meta_info
-                        .announce_list
-                        .clone()
-                        .unwrap_or(vec![])
-                        .into_iter()
-                        .map(|l| l.first().map(Clone::clone)),
-                )
-                .filter_map(|x| x)
-                .collect(),
+            TorrentSource::File(meta_info) => meta_info.announce_list.clone(),
             TorrentSource::Magnet(magnet) => magnet.tr.clone(),
         }
     }
 
     pub fn name(&self) -> String {
         match self {
-            TorrentSource::File(meta_info) => info_field!(&meta_info.info, name).clone(),
+            TorrentSource::File(meta_info) => meta_info.info.name.clone(),
             TorrentSource::Magnet(magnet) => magnet
                 .dn
                 .clone()

@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, error, sync::{atomic::AtomicBool, Arc}};
+use std::{
+    error,
+    net::SocketAddr,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use crate::{info::MetaInfo, torrent_source::TorrentSource};
 
@@ -9,7 +13,14 @@ pub mod utp;
 pub trait PeerConnection {
     type Error: error::Error;
 
-    fn new(peer: SocketAddr, torrent_source: TorrentSource, peer_id: String, port: u16, verbose: bool, killswitch: Arc<AtomicBool>) -> Result<Self, Self::Error>
+    fn new(
+        peer: SocketAddr,
+        torrent_source: TorrentSource,
+        peer_id: String,
+        port: u16,
+        verbose: bool,
+        killswitch: Arc<AtomicBool>,
+    ) -> Result<Self, Self::Error>
     where
         Self: Sized;
     fn download_piece(&mut self, piece_id: u32) -> Result<Vec<u8>, Self::Error>;

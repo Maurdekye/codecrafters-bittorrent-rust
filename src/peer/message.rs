@@ -1,13 +1,14 @@
+use std::collections::HashMap;
 use std::iter::{empty, once};
+use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::ops::Deref;
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Number, Value};
-
-use crate::bencode::encode::bencode_value;
+use crate::bencode::{BencodedValue, Number};
+use crate::dict;
 use crate::torrent_source::TorrentSource;
+use crate::types::Bytes;
 use crate::{
-    bencode::decode::consume_bencoded_value,
-    bterror,
+    bterror, bytes,
     error::BitTorrentError,
     util::{decode_bitfield_be, encode_bitfield_be},
 };
@@ -15,7 +16,7 @@ use crate::{
 pub trait Codec {
     type Error;
 
-    fn encode(&self) -> Result<Vec<u8>, Self::Error>;
+    fn encode(self) -> Result<Vec<u8>, Self::Error>;
     fn decode(bytes: &[u8]) -> Result<Self, Self::Error>
     where
         Self: Sized;
@@ -45,55 +46,147 @@ pub enum PeerMessage {
     Extension(ExtensionMessage),   // 20
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct RequestMessage {
     pub index: u32,
     pub begin: u32,
     pub length: u32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct PieceMessage {
     pub index: u32,
     pub begin: u32,
     pub block: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub enum ExtensionMessage {
     Handshake(ExtensionHandshake),
     Metadata(ExtensionMetadata, Option<Vec<u8>>),
 }
 
 impl ExtensionMessage {
-    pub fn name(&self) -> &str {
+    pub fn name(&self) -> Bytes {
         match self {
-            ExtensionMessage::Handshake(_) => "handshake",
-            ExtensionMessage::Metadata(_, _) => "ut_metadata",
+            ExtensionMessage::Handshake(_) => bytes!(b"handshake"),
+            ExtensionMessage::Metadata(_, _) => bytes!(b"ut_metadata"),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct ExtensionHandshake {
-    #[serde(rename = "m")]
-    pub messages: Option<Map<String, Value>>,
-    #[serde(rename = "p")]
+    pub messages: Option<HashMap<Bytes, Number>>,
     pub port: Option<u16>,
-    #[serde(rename = "v")]
-    pub version: Option<String>,
-    pub yourip: Option<String>,
-    pub ipv6: Option<String>,
-    pub ipv4: Option<String>,
+    pub version: Option<Bytes>,
+    pub yourip: Option<SocketAddr>,
+    pub ipv6: Option<SocketAddrV6>,
+    pub ipv4: Option<SocketAddrV4>,
     pub reqq: Option<Number>,
     pub metadata_size: Option<Number>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
+    fn from(value: BencodedValue) -> Self {
+        if let BencodedValue::Dict(mut handshake) = value {
+            Ok(ExtensionHandshake {
+                messages: handshake
+                    .remove(&bytes!(b"m"))
+                    .and_then(BencodedValue::into_dict)
+                    .and_then(|map| {
+                        let map = map
+                            .into_iter()
+                            .filter_map(|(k, v)| v.into_int().map(|i| (k, i)))
+                            .collect::<HashMap<_, _>>();
+                        map.is_empty().then_some(map)
+                    }),
+                port: handshake
+                    .remove(&bytes!(b"p"))
+                    .and_then(BencodedValue::into_int)
+                    .map(|inner| inner as u16),
+                version: handshake
+                    .remove(&bytes!(b"v"))
+                    .and_then(BencodedValue::into_bytes),
+                yourip: handshake
+                    .remove(&bytes!(b"yourip"))
+                    .and_then(BencodedValue::into_bytes)
+                    .map(Into::into),
+                ipv6: handshake
+                    .remove(&bytes!(b"ipv6"))
+                    .and_then(BencodedValue::into_bytes)
+                    .map(Into::into),
+                ipv4: handshake
+                    .remove(&bytes!(b"ipv4"))
+                    .and_then(BencodedValue::into_bytes)
+                    .map(Into::into),
+                reqq: handshake
+                    .remove(&bytes!(b"reqq"))
+                    .and_then(BencodedValue::into_int),
+                metadata_size: handshake
+                    .remove(&bytes!(b"metadata_size"))
+                    .and_then(BencodedValue::into_int),
+            })
+        } else {
+            Err(bterror!("Invalid extension handshake"))
+        }
+    }
+}
+
+impl Into<BencodedValue> for ExtensionHandshake {
+    fn into(self) -> BencodedValue {
+        dict! {
+            b"m" => self.messages,
+            b"p" => self.port.map(|x| x as Number),
+            b"v" => self.version,
+            b"yourip" => self.yourip.map(Into::<Bytes>::into),
+            b"ipv6" => self.ipv6.map(Into::<Bytes>::into),
+            b"ipv4" => self.ipv4.map(Into::<Bytes>::into),
+            b"reqq" => self.reqq,
+            b"metadata_size" => self.metadata_size,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct ExtensionMetadata {
-    pub msg_type: usize,
-    pub piece: usize,
-    pub total_size: Option<usize>,
+    pub msg_type: Number,
+    pub piece: Number,
+    pub total_size: Option<Number>,
+}
+
+impl From<BencodedValue> for Result<ExtensionMetadata, BitTorrentError> {
+    fn from(value: BencodedValue) -> Self {
+        if let BencodedValue::Dict(mut metadata) = value {
+            Ok(ExtensionMetadata {
+                msg_type: metadata
+                    .remove(&bytes!(b"msg_type"))
+                    .and_then(BencodedValue::into_int)
+                    .ok_or(bterror!("msg_type missing"))?
+                    .into(),
+                piece: metadata
+                    .remove(&bytes!(b"piece"))
+                    .and_then(BencodedValue::into_int)
+                    .ok_or(bterror!("piece missing"))?
+                    .into(),
+                total_size: metadata
+                    .remove(&bytes!(b"total_size"))
+                    .and_then(BencodedValue::into_int),
+            })
+        } else {
+            Err(bterror!("Invalid extension metadata"))
+        }
+    }
+}
+
+impl Into<BencodedValue> for ExtensionMetadata {
+    fn into(self) -> BencodedValue {
+        dict! {
+            b"msg_type" => self.msg_type,
+            b"piece" => self.piece,
+            b"total_size" => self.total_size,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -102,7 +195,7 @@ pub struct PeerMessageCodec {
 }
 
 impl PeerMessageCodec {
-    pub fn new(extensions_map: Vec<(String, u8)>) -> Self {
+    pub fn new(extensions_map: Vec<(Bytes, Number)>) -> Self {
         Self {
             extension_codec: ExtensionMessageCodec::new(extensions_map),
         }
@@ -113,16 +206,9 @@ impl PeerMessageCodec {
             handshake
                 .messages
                 .clone()
-                .unwrap_or(Map::new())
+                .unwrap_or(Default::default())
                 .into_iter()
-                .map(|(k, v)| {
-                    Ok((
-                        k,
-                        v.as_u64()
-                            .ok_or(bterror!("Invalid extension handshake format"))?
-                            as u8,
-                    ))
-                })
+                .map(|(k, v)| Ok((k, v)))
                 .collect::<Result<Vec<_>, BitTorrentError>>()?,
         ))
     }
@@ -145,16 +231,20 @@ impl PeerMessageCodec {
                     .flat_map(decode_bitfield_be)
                     .collect(),
             )),
-            Some(6) => Ok(PeerMessage::Request(RequestMessage::decode(&bytes[1..])?)),
-            Some(7) => Ok(PeerMessage::Piece(PieceMessage::decode(&bytes[1..])?)),
-            Some(8) => Ok(PeerMessage::Cancel(RequestMessage::decode(&bytes[1..])?)),
+            Some(6) => Ok(PeerMessage::Request(RequestMessage::decode(
+                &mut &bytes[1..],
+            )?)),
+            Some(7) => Ok(PeerMessage::Piece(PieceMessage::decode(&mut &bytes[1..])?)),
+            Some(8) => Ok(PeerMessage::Cancel(RequestMessage::decode(
+                &mut &bytes[1..],
+            )?)),
             Some(9) => Ok(PeerMessage::Port(u16::from_be_bytes(
                 bytes[1..3].try_into().unwrap(),
             ))),
             Some(14) => Ok(PeerMessage::HaveAll),
             Some(15) => Ok(PeerMessage::HaveNone),
             Some(16) => Ok(PeerMessage::RejectRequest(RequestMessage::decode(
-                &bytes[1..],
+                &mut &bytes[1..],
             )?)),
             Some(17) => Ok(PeerMessage::AllowFast(u32::from_be_bytes(
                 bytes[1..5].try_into().unwrap(),
@@ -167,7 +257,7 @@ impl PeerMessageCodec {
     }
 
     /// Encode a peer message into a byte array.
-    pub fn encode(&self, message: &PeerMessage) -> Result<Vec<u8>, BitTorrentError> {
+    pub fn encode(&self, message: PeerMessage) -> Result<Vec<u8>, BitTorrentError> {
         // dbg!(&self);
         let base_message: Vec<u8> = match message {
             PeerMessage::Keepalive => vec![],
@@ -213,64 +303,56 @@ impl Default for PeerMessageCodec {
 
 #[derive(Debug, Clone)]
 pub struct ExtensionMessageCodec {
-    extension_name_map: Vec<(String, u8)>,
+    extension_name_map: Vec<(Bytes, Number)>,
 }
 
 impl ExtensionMessageCodec {
-    pub fn new(map: Vec<(String, u8)>) -> Self {
+    pub fn new(map: Vec<(Bytes, Number)>) -> Self {
         Self {
-            extension_name_map: once(("handshake".to_string(), 0)).chain(map).collect(),
+            extension_name_map: once((Bytes(b"handshake".to_vec()), 0)).chain(map).collect(),
         }
     }
 
-    pub fn encode(&self, message: &ExtensionMessage) -> Result<Vec<u8>, BitTorrentError> {
+    pub fn encode(&self, message: ExtensionMessage) -> Result<Vec<u8>, BitTorrentError> {
         let name = message.name();
         let (_, code) = self
             .extension_name_map
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|(n, _)| *n == name)
             .ok_or(bterror!("Extension '{}' is unsupported by peer", name))?;
-        Ok(once(*code)
+        Ok(once(*code as u8)
             .chain(match message {
                 ExtensionMessage::Handshake(handshake) => {
-                    bencode_value(serde_json::to_value(handshake)?)?
+                    Into::<BencodedValue>::into(handshake).encode()?
                 }
-                ExtensionMessage::Metadata(metadata, data) => {
-                    bencode_value(serde_json::to_value(metadata)?)?
-                        .into_iter()
-                        .chain(
-                            data.clone()
-                                .map_or(Ok::<_, BitTorrentError>(vec![]), |data| Ok(data))?,
-                        )
-                        .collect::<Vec<_>>()
-                }
+                ExtensionMessage::Metadata(metadata, data) => Into::<BencodedValue>::into(metadata)
+                    .encode()?
+                    .into_iter()
+                    .chain(data.unwrap_or_default())
+                    .collect::<Vec<_>>(),
             })
             .collect())
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<ExtensionMessage, BitTorrentError> {
-        let code = bytes.get(0).ok_or(bterror!("Insufficient bytes"))?;
+        let (code, mut bytes) = bytes.split_first().ok_or(bterror!("Insufficient bytes"))?;
         let (name, _) = self
             .extension_name_map
             .iter()
-            .find(|(_, c)| c == code)
+            .find(|(_, c)| *c == (*code as i64))
             .ok_or(bterror!("Unrecognized extension code: {}", code))?;
-        match name.as_str() {
-            "handshake" => Ok(ExtensionMessage::Handshake(serde_json::from_value(
-                consume_bencoded_value(&mut &bytes[1..])?,
+        match name.deref() {
+            b"handshake" => Ok(ExtensionMessage::Handshake(<Result<_, _>>::from(
+                BencodedValue::ingest(&mut bytes)?,
             )?)),
-            "ut_metadata" => {
-                let mut msg_bytes = &bytes[1..];
-                Ok(ExtensionMessage::Metadata(
-                    serde_json::from_value(consume_bencoded_value(&mut msg_bytes)?)?,
-                    if msg_bytes.len() > 0 {
-                        Some(msg_bytes.to_vec())
-                    } else {
-                        None
-                    },
-                ))
-            }
-            name => Err(bterror!("Unrecognized extension name: {}", name)),
+            b"ut_metadata" => Ok(ExtensionMessage::Metadata(
+                <Result<_, _>>::from(BencodedValue::ingest(&mut bytes)?)?,
+                bytes.is_empty().then_some(bytes.to_vec()),
+            )),
+            name => Err(bterror!(
+                "Unrecognized extension name: {}",
+                Bytes::from(name)
+            )),
         }
     }
 }
@@ -284,7 +366,7 @@ impl Default for ExtensionMessageCodec {
 impl Codec for RequestMessage {
     type Error = BitTorrentError;
 
-    fn encode(&self) -> Result<Vec<u8>, Self::Error> {
+    fn encode(self) -> Result<Vec<u8>, Self::Error> {
         Ok(empty()
             .chain(self.index.to_be_bytes())
             .chain(self.begin.to_be_bytes())
@@ -319,7 +401,7 @@ impl Codec for RequestMessage {
 impl Codec for PieceMessage {
     type Error = BitTorrentError;
 
-    fn encode(&self) -> Result<Vec<u8>, Self::Error> {
+    fn encode(self) -> Result<Vec<u8>, Self::Error> {
         Ok(empty()
             .chain(self.index.to_be_bytes())
             .chain(self.begin.to_be_bytes())

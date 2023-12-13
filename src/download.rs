@@ -58,7 +58,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
     let (master_send, master_recieve) = mpsc::channel();
     let master_send = Arc::new(Mutex::new(master_send));
 
-    let num_pieces = meta_info.num_pieces();
+    let num_pieces = meta_info.info.pieces.len();
 
     for piece_id in 0..num_pieces {
         worker_send
