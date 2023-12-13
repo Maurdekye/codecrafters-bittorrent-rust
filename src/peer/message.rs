@@ -109,15 +109,15 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
                 yourip: handshake
                     .pull(b"yourip")
                     .and_then(BencodedValue::into_bytes)
-                    .map(Into::into),
+                    .map(SocketAddr::from),
                 ipv6: handshake
                     .pull(b"ipv6")
                     .and_then(BencodedValue::into_bytes)
-                    .map(Into::into),
+                    .map(SocketAddrV6::from),
                 ipv4: handshake
                     .pull(b"ipv4")
                     .and_then(BencodedValue::into_bytes)
-                    .map(Into::into),
+                    .map(SocketAddrV4::from),
                 reqq: handshake.pull(b"reqq").and_then(BencodedValue::into_int),
                 metadata_size: handshake
                     .pull(b"metadata_size")
@@ -135,9 +135,9 @@ impl From<ExtensionHandshake> for BencodedValue {
             b"m" => val.messages,
             b"p" => val.port.map(|x| x as Number),
             b"v" => val.version,
-            b"yourip" => val.yourip.map(Into::<Bytes>::into),
-            b"ipv6" => val.ipv6.map(Into::<Bytes>::into),
-            b"ipv4" => val.ipv4.map(Into::<Bytes>::into),
+            b"yourip" => val.yourip.map(Bytes::from),
+            b"ipv6" => val.ipv6.map(Bytes::from),
+            b"ipv4" => val.ipv4.map(Bytes::from),
             b"reqq" => val.reqq,
             b"metadata_size" => val.metadata_size,
         }
@@ -319,9 +319,9 @@ impl ExtensionMessageCodec {
         Ok(once(*code as u8)
             .chain(match message {
                 ExtensionMessage::Handshake(handshake) => {
-                    Into::<BencodedValue>::into(handshake).encode()?
+                    BencodedValue::from(handshake).encode()?
                 }
-                ExtensionMessage::Metadata(metadata, data) => Into::<BencodedValue>::into(metadata)
+                ExtensionMessage::Metadata(metadata, data) => BencodedValue::from(metadata)
                     .encode()?
                     .into_iter()
                     .chain(data.unwrap_or_default())

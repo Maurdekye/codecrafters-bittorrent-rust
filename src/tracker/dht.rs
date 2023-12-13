@@ -20,7 +20,8 @@ use crate::{
     list,
     peer::message::Codec,
     torrent_source::TorrentSource,
-    types::{Bytes, PullBytes}, util::read_datagram,
+    types::{Bytes, PullBytes},
+    util::read_datagram,
 };
 
 lazy_static! {
@@ -53,7 +54,7 @@ impl From<Vec<Node>> for Bytes {
                     node.id
                         .unwrap()
                         .into_iter()
-                        .chain(Into::<Bytes>::into(node.address))
+                        .chain(Bytes::from(node.address))
                         .collect::<Vec<u8>>()
                 })
                 .flatten()
@@ -89,7 +90,11 @@ impl Dht {
         dht
     }
 
-    pub fn exchange_message(&mut self, node: &Node, message: Message) -> Result<Message, BitTorrentError> {
+    pub fn exchange_message(
+        &mut self,
+        node: &Node,
+        message: Message,
+    ) -> Result<Message, BitTorrentError> {
         let bencoded_message: BencodedValue = message.into();
         let byte_encoded: Vec<u8> = bencoded_message.encode()?;
         self.socket.send_to(&byte_encoded[..], node.address);
@@ -178,13 +183,13 @@ impl From<Message> for BencodedValue {
                     },
                     Response::FindNode { id, nodes } => dict! {
                         b"id" => id,
-                        b"nodes" => Into::<Bytes>::into(nodes),
+                        b"nodes" => Bytes::from(nodes),
                     },
                     Response::GetPeers { id, token, response } => match response {
                         GetPeersReturnData::Nodes(nodes) => dict! {
                             b"id" => id,
                             b"token" => token,
-                            b"nodes" => Into::<Bytes>::into(nodes),
+                            b"nodes" => Bytes::from(nodes),
                         },
                         GetPeersReturnData::Peers(peers) => dict! {
                             b"id" => id,
@@ -285,7 +290,7 @@ impl From<BencodedValue> for Result<Message, BitTorrentError> {
                                 response
                                     .pull(b"nodes")
                                     .and_then(BencodedValue::into_bytes)
-                                    .map(Into::<Vec<Node>>::into),
+                                    .map(<Vec<Node>>::from),
                                 response.pull(b"token").and_then(BencodedValue::into_bytes),
                                 response
                                     .pull(b"values")
@@ -293,7 +298,7 @@ impl From<BencodedValue> for Result<Message, BitTorrentError> {
                                     .map(|list| {
                                         list.into_iter()
                                             .filter_map(BencodedValue::into_bytes)
-                                            .map(Into::<SocketAddr>::into)
+                                            .map(SocketAddr::from)
                                             .collect()
                                     }),
                             ) {

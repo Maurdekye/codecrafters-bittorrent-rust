@@ -170,7 +170,7 @@ pub fn decode_bitfield_be(bits: u8) -> [bool; 8] {
 /// Encode a bitfield into a byte in big-endian order.
 pub fn encode_bitfield_be(bits: [bool; 8]) -> u8 {
     bits.into_iter()
-        .fold(0, |acc, bit| acc << 1 | Into::<u8>::into(bit))
+        .fold(0, |acc, bit| acc << 1 | u8::from(bit))
 }
 
 /// Calculate the SHA1 hash of a byte slice.

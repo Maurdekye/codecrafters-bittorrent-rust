@@ -5,7 +5,7 @@ use crate::{
     peer::message::Codec,
     types::{Bytes, PullBytes},
 };
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV4};
 
 pub mod dht;
 pub mod multimodal;
@@ -66,7 +66,7 @@ impl Codec for Vec<SocketAddr> {
         Ok(bytes
             .chunks(6)
             .map(Bytes::from)
-            .map(Into::into)
+            .map(SocketAddrV4::from)
             .map(SocketAddr::V4)
             .collect())
     }

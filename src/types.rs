@@ -115,8 +115,8 @@ impl From<SocketAddr> for Bytes {
 impl From<Bytes> for SocketAddr {
     fn from(val: Bytes) -> Self {
         match val.len() {
-            4 => SocketAddr::V4(Into::<SocketAddrV4>::into(val)),
-            16 => SocketAddr::V6(Into::<SocketAddrV6>::into(val)),
+            4 => SocketAddr::V4(SocketAddrV4::from(val)),
+            16 => SocketAddr::V6(SocketAddrV6::from(val)),
             _ => panic!("Invalid socket address"),
         }
     }
