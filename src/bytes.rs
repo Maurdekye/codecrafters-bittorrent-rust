@@ -1,8 +1,9 @@
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display, Formatter},
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     ops::{Deref, DerefMut},
-    vec, collections::HashMap,
+    vec,
 };
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -16,10 +17,10 @@ macro_rules! bytes {
 }
 
 fn escaped_byte_to_string(byte: u8) -> String {
-    if byte.is_ascii() {
+    if byte.is_ascii_alphanumeric() || byte.is_ascii_punctuation() || byte.is_ascii_whitespace() {
         String::from(byte as char)
     } else {
-        format!(r"\x{:02X}", byte)
+        format!(r"\x{:02x}", byte)
     }
 }
 

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Display, iter::once};
 
-use crate::{bterror, error::BitTorrentError, types::Bytes};
+use crate::{bterror, bytes::Bytes, error::BitTorrentError};
 
 pub type Number = i64;
 
@@ -71,7 +71,7 @@ impl BencodedValue {
                     String::from_utf8(rest[..end_token].to_vec())?.parse()?,
                 ))
             }
-            Some((b'l', rest)) => {
+            Some((b'l', mut rest)) => {
                 let mut items = Vec::new();
                 loop {
                     match rest.split_first() {
@@ -84,12 +84,13 @@ impl BencodedValue {
                             *bytes = rest;
                             let value = Self::ingest(bytes)?;
                             items.push(value);
+                            rest = bytes;
                         }
                     }
                 }
                 Ok(Self::List(items))
             }
-            Some((b'd', rest)) => {
+            Some((b'd', mut rest)) => {
                 let mut map = HashMap::new();
                 loop {
                     match rest.split_first() {
@@ -103,6 +104,7 @@ impl BencodedValue {
                             if let Self::Bytes(key) = Self::ingest(bytes)? {
                                 let value = Self::ingest(bytes)?;
                                 map.insert(key, value);
+                                rest = bytes;
                             } else {
                                 return Err(bterror!("Invalid dict key"));
                             }
@@ -213,9 +215,9 @@ impl Display for BencodedValue {
             BencodedValue::Dict(dict) => match dict.iter().collect::<Vec<_>>().split_first() {
                 None => write!(f, "{{}}")?,
                 Some(((first_key, first_val), rest)) => {
-                    write!(f, "{{ b\"{}\": {}", first_key.to_string(), first_val)?;
+                    write!(f, "{{ \"{}\": {}", first_key.to_string(), first_val)?;
                     for (key, value) in rest {
-                        write!(f, ", b\"{}\": {}", key, value)?;
+                        write!(f, ", \"{}\": {}", key, value)?;
                     }
                     write!(f, " }}")?;
                 }

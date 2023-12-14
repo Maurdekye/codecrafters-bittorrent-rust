@@ -1,9 +1,9 @@
 use crate::{
     bencode::{BencodedValue, Number},
     bterror,
+    bytes::{Bytes, PullBytes},
     error::BitTorrentError,
     peer::message::Codec,
-    types::{Bytes, PullBytes},
 };
 use std::net::{SocketAddr, SocketAddrV4};
 

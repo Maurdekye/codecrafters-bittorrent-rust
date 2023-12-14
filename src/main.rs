@@ -12,7 +12,10 @@ use anyhow::Context;
 use clap::{ArgAction, Parser};
 use download::download_piece_from_peer;
 use error::BitTorrentError;
-use tracker::{dht::Dht, multimodal::Tracker};
+use tracker::{
+    dht::{Dht, DhtMessage, Query},
+    multimodal::Tracker,
+};
 
 use crate::{
     bencode::BencodedValue,
@@ -27,6 +30,7 @@ use crate::{
 };
 
 mod bencode;
+mod bytes;
 mod download;
 mod error;
 mod info;
@@ -35,7 +39,6 @@ mod multithread;
 mod peer;
 mod torrent_source;
 mod tracker;
-mod types;
 mod util;
 
 /// Rust BitTorrent Downloader
@@ -223,6 +226,8 @@ fn main() -> Result<(), BitTorrentError> {
             while cslice.len() > 0 {
                 let decoded = BencodedValue::ingest(&mut cslice)?;
                 println!("{:#?}", decoded);
+                dbg!(<Result<tracker::dht::KrpcMessage, _>>::from(decoded))
+                    .and_then(|msg| Ok(dbg!(BencodedValue::from(msg))))?;
             }
         }
         Subcommand::Info(info_args) => {
@@ -250,11 +255,24 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::DhtQuery(dht_query_args) => {
             let torrent_source = TorrentSource::from_string(&dht_query_args.torrent_source)?;
-            let mut dht = Dht::new(torrent_source, dht_query_args.peer_id);
-            let peers = dht.next();
-            if let Some(peers) = peers {
-                for sock in peers {
-                    println!("{}", sock);
+            let info_hash = torrent_source.hash()?;
+            let peer_id = dht_query_args.peer_id.clone();
+            let mut dht = Dht::new(torrent_source, true);
+            while let Some(node) = dht.nodes.pop_front() {
+                dbg!(&node);
+                let response = dht.exchange_message(
+                    &node,
+                    DhtMessage::Query(Query::GetPeers {
+                        id: peer_id.clone().into(),
+                        info_hash,
+                    }),
+                );
+                match response {
+                    Ok(message) => {
+                        dbg!(message);
+                        break;
+                    }
+                    Err(err) => println!("Error: {}", err),
                 }
             }
         }

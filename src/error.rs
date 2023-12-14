@@ -45,24 +45,28 @@ impl From<anyhow::Error> for BitTorrentError {
     }
 }
 
-macro_rules! from_err {
-    ($err_type:ty) => {
-        impl From<$err_type> for BitTorrentError {
-            fn from(value: $err_type) -> Self {
-                BitTorrentError::new(value.to_string())
+macro_rules! make_errs {
+    ($($err_type:ty),+) => {
+        $(
+            impl From<$err_type> for BitTorrentError {
+                fn from(value: $err_type) -> Self {
+                    BitTorrentError::new(value.to_string())
+                }
             }
-        }
+        )+
     };
 }
 
-from_err!(std::io::Error);
-from_err!(serde_json::Error);
-from_err!(TryFromSliceError);
-from_err!(FromHexError);
-from_err!(multihash::Error);
-from_err!(FromUtf8Error);
-from_err!(ParseIntError);
-from_err!(TryFromIntError);
+make_errs!(
+    std::io::Error,
+    serde_json::Error,
+    TryFromSliceError,
+    FromHexError,
+    multihash::Error,
+    FromUtf8Error,
+    ParseIntError,
+    TryFromIntError
+);
 
 impl<T> From<PoisonError<T>> for BitTorrentError {
     fn from(value: PoisonError<T>) -> Self {

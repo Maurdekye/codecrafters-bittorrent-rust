@@ -17,10 +17,10 @@ use std::default::Default;
 use crate::{
     bencode::{BencodedValue, Number},
     bterror, bytes,
+    bytes::Bytes,
     error::BitTorrentError,
     info::MetaInfo,
     torrent_source::TorrentSource,
-    types::Bytes,
     util::{bytes_to_hex, cap_length, sha1_hash, timestr},
 };
 

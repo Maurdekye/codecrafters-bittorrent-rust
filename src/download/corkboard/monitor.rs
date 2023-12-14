@@ -43,11 +43,11 @@ pub fn monitor(
                 let active_unaquired_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Active(false))).count();
                 let superceded_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Superceded)).count();
                 let error_count = board.peers.iter().filter(|(_, peer)| matches!(peer.state, PeerState::Error)).count();
-                
+
                 // collect piece statistics
                 let unfetched_count = board.pieces.iter().filter(|piece| matches!(piece.state, PieceState::Unfetched)).count();
                 let in_progress_count = board.pieces.iter().filter(|piece| matches!(piece.state, PieceState::InProgress)).count();
-    
+
                 // print results
                 log(format!(""));
                 log(format!("----------------------------"));

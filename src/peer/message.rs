@@ -4,9 +4,9 @@ use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::ops::Deref;
 
 use crate::bencode::{BencodedValue, Number};
+use crate::bytes::{Bytes, PullBytes};
 use crate::dict;
 use crate::torrent_source::TorrentSource;
-use crate::types::{Bytes, PullBytes};
 use crate::{
     bterror, bytes,
     error::BitTorrentError,

@@ -1,6 +1,4 @@
-use crate::{
-    error::BitTorrentError, info::MetaInfo, magnet::Magnet, util::bytes_to_hex,
-};
+use crate::{error::BitTorrentError, info::MetaInfo, magnet::Magnet, util::bytes_to_hex};
 
 #[derive(Debug, Clone)]
 pub enum TorrentSource {

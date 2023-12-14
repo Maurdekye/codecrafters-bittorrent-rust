@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    iter::empty,
     net::{SocketAddr, UdpSocket},
     time::{Duration, SystemTime},
 };
@@ -15,11 +16,14 @@ use crate::{
     error::BitTorrentError,
     peer::message::Codec,
     torrent_source::TorrentSource,
-    tracker::TrackerResponse,
+    tracker::{
+        dht::{DhtMessage, GetPeersReturnData, Response},
+        TrackerResponse,
+    },
     util::{querystring_encode, read_datagram},
 };
 
-use super::dht::Dht;
+use super::dht::{Dht, Query};
 
 const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 const DHT_QUERY_INTERVAL: u64 = 30;
@@ -44,7 +48,7 @@ impl Tracker {
     ) -> Result<Tracker, BitTorrentError> {
         let mut trackers: VecDeque<String> = torrent_source.trackers().into();
         Ok(Tracker {
-            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source, &peer_id),
+            active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source),
             trackers,
             torrent_source,
             peer_id,
@@ -55,7 +59,6 @@ impl Tracker {
     fn _next_tracker(
         trackers: &mut VecDeque<String>,
         torrent_source: &TorrentSource,
-        peer_id: &String,
     ) -> TrackerConnection {
         loop {
             match trackers.pop_front() {
@@ -63,19 +66,13 @@ impl Tracker {
                     Ok(tracker_connection) => return tracker_connection,
                     Err(err) => println!("Error connecting to tracker at {}: {}", url, err),
                 },
-                None => {
-                    return TrackerConnection::Dht(Dht::new(
-                        torrent_source.clone(),
-                        peer_id.clone(),
-                    ))
-                }
+                None => return TrackerConnection::Dht(Dht::new(torrent_source.clone(), true)),
             }
         }
     }
 
     fn cycle_trackers(&mut self) {
-        self.active_connection =
-            Tracker::_next_tracker(&mut self.trackers, &self.torrent_source, &self.peer_id);
+        self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source);
     }
 
     fn _query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
@@ -135,10 +132,32 @@ impl Tracker {
                 }
                 udp_connection.annouce(&self.torrent_source, &self.peer_id, self.port)
             }
-            TrackerConnection::Dht(dht) => Ok((
-                dht.next().ok_or(bterror!("No dht peers"))?,
-                DHT_QUERY_INTERVAL,
-            )),
+            TrackerConnection::Dht(dht) => {
+                println!("Querying DHT");
+                while let Some(node) = dht.nodes.pop_front() {
+                    dbg!(&node);
+                    match dht.exchange_message(
+                        &node,
+                        DhtMessage::Query(Query::GetPeers {
+                            id: self.peer_id.clone().into(),
+                            info_hash: self.torrent_source.hash()?,
+                        }),
+                    ) {
+                        Ok(DhtMessage::Response(Response::GetPeers { response, .. })) => {
+                            match response {
+                                GetPeersReturnData::Nodes(nodes) => dht.nodes.extend(nodes),
+                                GetPeersReturnData::Peers(peers) => {
+                                    dht.nodes.push_back(node);
+                                    return Ok((peers, DHT_QUERY_INTERVAL));
+                                }
+                            }
+                        }
+                        Ok(msg) => println!("Unexpected message: {:?}", msg),
+                        Err(err) => println!("Error from DHT node: {}", err),
+                    }
+                }
+                Err(bterror!("No peers found in DHT"))
+            }
         }
     }
 
@@ -250,8 +269,7 @@ impl UdpTrackerConnection {
             .ok_or(bterror!("No connection id to use"))?;
 
         // send announce request
-        let request_bytes = []
-            .into_iter()
+        let request_bytes = empty()
             .chain(connection_id.to_be_bytes())
             .chain(1_u32.to_be_bytes()) // action (1: announce)
             .chain(transaction_id.to_be_bytes())

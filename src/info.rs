@@ -5,9 +5,10 @@ use std::{
 
 use crate::{
     bencode::{BencodedValue, Number},
-    bterror, dict,
+    bterror,
+    bytes::{Bytes, PullBytes},
+    dict,
     error::BitTorrentError,
-    types::{Bytes, PullBytes},
     util::sha1_hash,
 };
 use anyhow::Context;
@@ -88,6 +89,7 @@ impl From<Info> for BencodedValue {
             },
             FileInfo::Files(files) => dict! {
                 b"name" => Bytes::from(val.name),
+                b"pieces" => Bytes(val.pieces.into_iter().flatten().collect()),
                 b"piece length" => val.piece_length as Number,
                 b"files" => files.into_iter().map(|file| dict! {
                     b"length" => file.length as Number,
@@ -117,10 +119,7 @@ impl From<BencodedValue> for Result<Info, BitTorrentError> {
                     .and_then(BencodedValue::into_bytes)
                     .map(|value| value.chunks(20).filter_map(|x| x.try_into().ok()).collect())
                     .ok_or(bterror!("Missing pieces"))?,
-                file_info: match info
-                    .pull(b"length")
-                    .and_then(BencodedValue::into_int)
-                {
+                file_info: match info.pull(b"length").and_then(BencodedValue::into_int) {
                     Some(length) => FileInfo::Length(length as usize),
                     None => FileInfo::Files(
                         info.pull(b"files")
