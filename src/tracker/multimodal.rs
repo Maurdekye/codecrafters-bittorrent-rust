@@ -28,7 +28,7 @@ use crate::{
 use super::dht::{Dht, Query};
 
 const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
-const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(3);
 const DHT_QUERY_INTERVAL: Duration = Duration::from_secs(0);
 const PARALLEL_DHT_SEARCH_COUNT: usize = 16;
 
@@ -141,7 +141,6 @@ impl Tracker {
                 udp_connection.annouce(&self.torrent_source, &self.peer_id, self.port)
             }
             TrackerConnection::Dht(dht) => {
-                println!("Querying DHT");
                 while !dht.nodes.is_empty() {
                     let (peers, nodes): (Vec<Option<Vec<SocketAddr>>>, Vec<Option<Vec<Node>>>) =
                         dht.nodes
@@ -151,6 +150,7 @@ impl Tracker {
                             .map(|node| {
                                 let mut socket = UdpSocket::bind("0.0.0.0:0")?;
                                 socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT))?;
+                                socket.set_write_timeout(Some(DHT_QUERY_TIMEOUT))?;
                                 match Dht::exchange_message(
                                     &mut socket,
                                     &node,

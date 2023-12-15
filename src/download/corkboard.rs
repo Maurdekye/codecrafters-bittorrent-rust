@@ -127,6 +127,7 @@ pub enum PeerState {
     Active(bool),
     Inactive,
     Superceded,
+    #[allow(unused)]
     Error,
 }
 
@@ -179,6 +180,7 @@ pub fn corkboard_download<T: PeerConnection>(
     let mut tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
 
     // get meta info
+    let mut peer_list = Vec::new();
     let meta_info = match torrent_source {
         TorrentSource::File(meta_info) => meta_info,
         TorrentSource::Magnet(_) => {
@@ -197,12 +199,13 @@ pub fn corkboard_download<T: PeerConnection>(
                         config.verbose,
                         Arc::new(AtomicBool::new(false)),
                     ) {
-                        Ok(peer) => {
-                            return Ok::<_, BitTorrentError>(
-                                peer.meta_info()
-                                    .ok_or(bterror!("Meta info was not included"))?
-                                    .clone(),
-                            )
+                        Ok(peer_connection) => {
+                            let meta_info = peer_connection
+                                .meta_info()
+                                .ok_or(bterror!("Meta info was not included"))
+                                .cloned();
+                            peer_list.push(peer);
+                            return Ok::<_, BitTorrentError>(meta_info?);
                         }
                         Err(err) => {
                             log(format!("[{}] Disconnected from peer: {}", peer, err));
@@ -217,6 +220,11 @@ pub fn corkboard_download<T: PeerConnection>(
     log(format!("Initializing Corkboard"));
     let corkboard: Arc<RwLock<Corkboard>> =
         Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
+    if let Ok(mut board) = corkboard.write() {
+        board
+            .peers
+            .extend(peer_list.into_iter().map(|peer| (peer, Peer::new())));
+    }
 
     if !config.verbose {
         println!("Starting download");
