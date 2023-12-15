@@ -16,7 +16,14 @@ pub enum BencodedValue {
 impl BencodedValue {
     pub fn encode(self) -> Result<Vec<u8>, BitTorrentError> {
         match self {
-            Self::Bytes(bytes) => Ok(bytes.into_inner()),
+            Self::Bytes(bytes) => Ok(bytes
+                .len()
+                .to_string()
+                .into_bytes()
+                .into_iter()
+                .chain(once(b':'))
+                .chain(bytes.into_inner())
+                .collect()),
             Self::Int(int) => Ok(once(b'i')
                 .chain(int.to_string().as_bytes().to_vec())
                 .chain(once(b'e'))

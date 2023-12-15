@@ -1,9 +1,11 @@
 use std::{
     collections::VecDeque,
-    iter::empty,
+    iter::{empty, once},
     net::{SocketAddr, UdpSocket},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime}, ops::ControlFlow,
 };
+
+use rayon::prelude::*;
 
 use anyhow::Context;
 
@@ -17,16 +19,18 @@ use crate::{
     peer::message::Codec,
     torrent_source::TorrentSource,
     tracker::{
-        dht::{DhtMessage, GetPeersReturnData, Response},
+        dht::{DhtMessage, Node},
         TrackerResponse,
     },
-    util::{querystring_encode, read_datagram},
+    util::{querystring_encode, read_datagram, timestr, Unique},
 };
 
 use super::dht::{Dht, Query};
 
 const TRACKER_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
-const DHT_QUERY_INTERVAL: u64 = 30;
+const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const DHT_QUERY_INTERVAL: Duration = Duration::from_secs(0);
+const PARALLEL_DHT_SEARCH_COUNT: usize = 16;
 
 lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
@@ -35,6 +39,7 @@ lazy_static! {
 pub struct Tracker {
     pub torrent_source: TorrentSource,
     active_connection: TrackerConnection,
+    peers: VecDeque<SocketAddr>,
     pub trackers: VecDeque<String>,
     pub peer_id: String,
     pub port: u16,
@@ -49,6 +54,7 @@ impl Tracker {
         let mut trackers: VecDeque<String> = torrent_source.trackers().into();
         Ok(Tracker {
             active_connection: Tracker::_next_tracker(&mut trackers, &torrent_source),
+            peers: VecDeque::new(),
             trackers,
             torrent_source,
             peer_id,
@@ -75,7 +81,7 @@ impl Tracker {
         self.active_connection = Tracker::_next_tracker(&mut self.trackers, &self.torrent_source);
     }
 
-    fn _query(&mut self) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
+    fn _query(&mut self) -> Result<(Vec<SocketAddr>, Duration), BitTorrentError> {
         match &mut self.active_connection {
             TrackerConnection::Http(announce) => {
                 let client = reqwest::blocking::Client::new();
@@ -118,7 +124,9 @@ impl Tracker {
                     .to_vec();
 
                 match <Result<_, _>>::from(BencodedValue::ingest(&mut &raw_body[..])?)? {
-                    TrackerResponse::Success { interval, peers } => Ok((peers, interval as u64)),
+                    TrackerResponse::Success { interval, peers } => {
+                        Ok((peers, Duration::from_secs(interval as u64)))
+                    }
                     TrackerResponse::Failure { failure_reason } => {
                         Err(bterror!("Tracker query failure: {}", failure_reason))
                     }
@@ -134,26 +142,74 @@ impl Tracker {
             }
             TrackerConnection::Dht(dht) => {
                 println!("Querying DHT");
-                while let Some(node) = dht.nodes.pop_front() {
-                    dbg!(&node);
-                    match dht.exchange_message(
-                        &node,
-                        DhtMessage::Query(Query::GetPeers {
-                            id: self.peer_id.clone().into(),
-                            info_hash: self.torrent_source.hash()?,
-                        }),
-                    ) {
-                        Ok(DhtMessage::Response(Response::GetPeers { response, .. })) => {
-                            match response {
-                                GetPeersReturnData::Nodes(nodes) => dht.nodes.extend(nodes),
-                                GetPeersReturnData::Peers(peers) => {
-                                    dht.nodes.push_back(node);
-                                    return Ok((peers, DHT_QUERY_INTERVAL));
+                while !dht.nodes.is_empty() {
+                    let (peers, nodes): (Vec<Option<Vec<SocketAddr>>>, Vec<Option<Vec<Node>>>) =
+                        dht.nodes
+                            .drain(..PARALLEL_DHT_SEARCH_COUNT.min(dht.nodes.len()))
+                            .collect::<Vec<_>>()
+                            .par_iter()
+                            .map(|node| {
+                                let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+                                socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT))?;
+                                match Dht::exchange_message(
+                                    &mut socket,
+                                    &node,
+                                    DhtMessage::Query(Query::GetPeers {
+                                        id: self.peer_id.clone().into(),
+                                        info_hash: self.torrent_source.hash()?,
+                                    }),
+                                ) {
+                                    Ok(DhtMessage::Response { nodes, peers, .. }) => {
+                                        if peers.as_ref().map_or(true, |peers| peers.is_empty()) {
+                                            Ok((peers, nodes))
+                                        } else {
+                                            Ok((
+                                                peers,
+                                                nodes.map(|nodes| {
+                                                    nodes
+                                                        .into_iter()
+                                                        .chain(once(node.clone()))
+                                                        .collect()
+                                                }),
+                                            ))
+                                        }
+                                    }
+                                    _ => Ok((None, None)),
                                 }
-                            }
-                        }
-                        Ok(msg) => println!("Unexpected message: {:?}", msg),
-                        Err(err) => println!("Error from DHT node: {}", err),
+                            })
+                            .collect::<Result<Vec<_>, BitTorrentError>>()?
+                            .into_iter()
+                            .unzip();
+
+                    let new_nodes = nodes
+                        .into_iter()
+                        .filter_map(|x| x)
+                        .flatten()
+                        .filter(|node| !dht.nodes.contains(node))
+                        .collect::<Vec<_>>();
+                    let pre_node_count = dht.nodes.len();
+
+                    for node in new_nodes {
+                        dht.nodes.push_back(node);
+                    }
+
+                    let peers = peers
+                        .into_iter()
+                        .filter_map(|x| x)
+                        .flatten()
+                        .unique()
+                        .collect::<Vec<_>>();
+
+                    println!(
+                        "[{}] added {} new nodes, {} total nodes, found {} peers",
+                        timestr(),
+                        dht.nodes.len() - pre_node_count,
+                        dht.nodes.len(),
+                        peers.len()
+                    );
+
+                    if !peers.is_empty() {
+                        return Ok((peers, DHT_QUERY_INTERVAL));
                     }
                 }
                 Err(bterror!("No peers found in DHT"))
@@ -161,13 +217,31 @@ impl Tracker {
         }
     }
 
-    pub fn query(&mut self) -> (Vec<SocketAddr>, u64) {
+    pub fn query(&mut self) -> (Vec<SocketAddr>, Duration) {
         loop {
             match self._query() {
                 Ok(tracker_info) => return tracker_info,
                 Err(err) => {
                     println!("Error querying tracker: {}", err);
                     self.cycle_trackers();
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for Tracker {
+    type Item = (SocketAddr, ControlFlow<Duration, ()>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(peer) = self.peers.pop_front() {
+                return Some((peer, ControlFlow::Continue(())));
+            } else {
+                let (peers, interval) = self.query();
+                if let Some((yield_peer, rest)) = peers.split_first() {
+                    self.peers.extend(rest);
+                    return Some((*yield_peer, ControlFlow::Break(interval)));
                 }
             }
         }
@@ -260,7 +334,7 @@ impl UdpTrackerConnection {
         torrent_source: &TorrentSource,
         peer_id: &str,
         port: u16,
-    ) -> Result<(Vec<SocketAddr>, u64), BitTorrentError> {
+    ) -> Result<(Vec<SocketAddr>, Duration), BitTorrentError> {
         let transaction_id: u32 = rand::random();
         let key: u32 = rand::random();
 
@@ -303,6 +377,6 @@ impl UdpTrackerConnection {
 
         let peers = <Vec<SocketAddr>>::decode(&mut &response_bytes[20..])?;
 
-        Ok((peers, interval))
+        Ok((peers, Duration::from_secs(interval)))
     }
 }

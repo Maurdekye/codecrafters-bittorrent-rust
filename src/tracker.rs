@@ -10,6 +10,7 @@ use std::net::{SocketAddr, SocketAddrV4};
 pub mod dht;
 pub mod multimodal;
 
+#[derive(Debug)]
 pub enum TrackerResponse {
     Success {
         interval: Number,

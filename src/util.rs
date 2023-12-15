@@ -4,6 +4,8 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use sha1::{Digest, Sha1};
 use std::{
+    collections::HashSet,
+    hash::Hash,
     io::Read,
     net::{TcpStream, UdpSocket},
     str::from_utf8,
@@ -226,5 +228,57 @@ pub fn cap_length(msg: String, max_len: usize) -> String {
         format!("{}...", &msg[..max_len - 3])
     } else {
         msg.to_string()
+    }
+}
+
+#[allow(unused)]
+#[derive(Debug, Clone)]
+pub enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+pub trait Unique<I: Iterator>: Iterator
+where
+    I::Item: Eq + Hash + Clone,
+{
+    fn unique(self) -> UniqueIter<I>;
+}
+
+impl<I> Unique<I> for I
+where
+    I: Iterator,
+    I::Item: Eq + Hash + Clone,
+{
+    fn unique(self) -> UniqueIter<I> {
+        UniqueIter {
+            iter: self,
+            seen: HashSet::new(),
+        }
+    }
+}
+
+pub struct UniqueIter<I: Iterator>
+where
+    I::Item: Eq + Hash + Clone,
+{
+    iter: I,
+    seen: HashSet<I::Item>,
+}
+
+impl<I> Iterator for UniqueIter<I>
+where
+    I: Iterator,
+    I::Item: Eq + Hash + Clone,
+{
+    type Item = I::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(item) = self.iter.next() {
+            if self.seen.insert(item.clone()) {
+                return Some(item);
+            }
+        }
+        None
     }
 }

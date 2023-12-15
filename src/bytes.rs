@@ -6,6 +6,8 @@ use std::{
     vec,
 };
 
+use crate::{bterror, error::BitTorrentError};
+
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Bytes(pub Vec<u8>);
 
@@ -113,13 +115,19 @@ impl From<SocketAddr> for Bytes {
     }
 }
 
-impl From<Bytes> for SocketAddr {
+impl From<Bytes> for Result<SocketAddr, BitTorrentError> {
     fn from(val: Bytes) -> Self {
         match val.len() {
-            4 => SocketAddr::V4(SocketAddrV4::from(val)),
-            16 => SocketAddr::V6(SocketAddrV6::from(val)),
-            _ => panic!("Invalid socket address"),
+            6 => Ok(SocketAddr::V4(SocketAddrV4::from(val))),
+            18 => Ok(SocketAddr::V6(SocketAddrV6::from(val))),
+            l => Err(bterror!("Invalid socket address: {l}")),
         }
+    }
+}
+
+impl FromIterator<u8> for Bytes {
+    fn from_iter<T: IntoIterator<Item = u8>>(iter: T) -> Self {
+        Bytes(iter.into_iter().collect())
     }
 }
 

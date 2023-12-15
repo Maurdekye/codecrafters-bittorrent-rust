@@ -109,7 +109,8 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
                 yourip: handshake
                     .pull(b"yourip")
                     .and_then(BencodedValue::into_bytes)
-                    .map(SocketAddr::from),
+                    .map(<Result<SocketAddr, _>>::from)
+                    .transpose()?,
                 ipv6: handshake
                     .pull(b"ipv6")
                     .and_then(BencodedValue::into_bytes)

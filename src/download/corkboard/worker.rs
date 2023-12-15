@@ -247,11 +247,11 @@ where
                         connection.address()
                     ));
 
-                    // mark peer as errored & sever connection
+                    // mark peer as disconnected & sever connection
                     board
                         .peers
                         .entry(connection.address().clone())
-                        .and_modify(|peer| peer.state = PeerState::Error);
+                        .and_modify(|peer| peer.state = PeerState::Active(false));
                     connection.sever().unwrap();
 
                     // mark piece as unfetched

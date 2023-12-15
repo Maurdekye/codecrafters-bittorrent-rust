@@ -12,3 +12,5 @@ target/
 torrents/
 downloads/
 tmp/
+test.ps1
+.vscode/

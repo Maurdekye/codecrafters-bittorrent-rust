@@ -31,7 +31,9 @@ lazy_static! {
         serde_json::from_reader(File::open("dht_nodes.json").unwrap()).unwrap();
 }
 
-#[derive(Debug, Clone)]
+const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeAddress {
     Ip(SocketAddr),
     Domain(String),
@@ -65,12 +67,23 @@ pub struct Node {
     address: NodeAddress,
 }
 
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.id, other.id) {
+            (Some(id1), Some(id2)) => id1 == id2,
+            _ => self.address == other.address,
+        }
+    }
+}
+
 impl From<Bytes> for Vec<Node> {
     fn from(val: Bytes) -> Self {
         val.chunks(26)
             .map(|chunk| Node {
                 id: Some(chunk[0..20].try_into().unwrap()),
-                address: NodeAddress::Ip(SocketAddr::from(Bytes(chunk[20..26].to_vec()))),
+                address: NodeAddress::Ip(
+                    <Result<SocketAddr, _>>::from(Bytes(chunk[20..26].to_vec())).unwrap(),
+                ),
             })
             .collect()
     }
@@ -116,16 +129,16 @@ impl Dht {
             socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
             verbose,
         };
-        dht.socket.set_read_timeout(Some(Duration::from_secs(60)));
+        dht.socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT));
         dht
     }
 
     pub fn exchange_message(
-        &mut self,
+        socket: &mut UdpSocket,
         node: &Node,
         message: DhtMessage,
     ) -> Result<DhtMessage, BitTorrentError> {
-        self.socket.connect(node.address.clone());
+        socket.connect(node.address.clone())?;
 
         // send message
         let transaction_id = Bytes(rand::random::<[u8; 2]>().to_vec());
@@ -133,18 +146,14 @@ impl Dht {
             transaction_id: transaction_id.clone(),
             dht_message: message,
         };
-        self.log(format!(" ^.^ {:#?}", &krpc_message));
         let bencoded: BencodedValue = krpc_message.into();
-        self.log(&bencoded);
         let byte_encoded = bencoded.encode()?;
-        self.socket.send(&byte_encoded[..]);
-        self.log(" ^^^");
+        socket.send(&byte_encoded[..]);
 
         // recieve message
-        let response_bytes = read_datagram(&mut self.socket)?;
+        let response_bytes = read_datagram(socket)?;
         let response =
             <Result<KrpcMessage, _>>::from(BencodedValue::ingest(&mut &response_bytes[..])?)?;
-        self.log(format!(" vvv {:#?}", response));
         if response.transaction_id != transaction_id {
             Err(bterror!(
                 "Response transaction id does not match: recieved {}, expected {}",
@@ -215,29 +224,19 @@ impl From<KrpcMessage> for BencodedValue {
                     }
                 }
             },
-            DhtMessage::Response(response) => dict! {
+            DhtMessage::Response {
+                id,
+                token,
+                nodes,
+                peers,
+            } => dict! {
                 b"t" => value.transaction_id,
                 b"y" => bytes!(b"r"),
-                b"r" => match response {
-                    Response::Ping { id } => dict! {
-                        b"id" => id
-                    },
-                    Response::FindNode { id, nodes } => dict! {
-                        b"id" => id,
-                        b"nodes" => Bytes::from(nodes),
-                    },
-                    Response::GetPeers { id, token, response } => match response {
-                        GetPeersReturnData::Nodes(nodes) => dict! {
-                            b"id" => id,
-                            b"token" => token,
-                            b"nodes" => Bytes::from(nodes),
-                        },
-                        GetPeersReturnData::Peers(peers) => dict! {
-                            b"id" => id,
-                            b"token" => token,
-                            b"values" => Bytes(<Vec<SocketAddr>>::encode(peers).unwrap()),
-                        },
-                    },
+                b"r" => dict! {
+                    b"id" => id,
+                    b"token" => token,
+                    b"nodes" => nodes.map(Bytes::from),
+                    b"values" => peers.map(|peers| peers.into_iter().map(Bytes::from).flatten().collect::<Bytes>()),
                 }
             },
             DhtMessage::Error(code, error) => dict! {
@@ -322,54 +321,35 @@ impl From<BencodedValue> for Result<KrpcMessage, BitTorrentError> {
                             return Err(bterror!("Invalid KRPC message: missing query arguments"));
                         }
                     }),
-                    b"r" => DhtMessage::Response({
+                    b"r" => {
                         if let Some(mut response) =
                             message.pull(b"r").and_then(BencodedValue::into_dict)
                         {
-                            match (
-                                response.pull(b"id").and_then(BencodedValue::into_bytes),
-                                response
+                            DhtMessage::Response {
+                                id: response
+                                    .pull(b"id")
+                                    .and_then(BencodedValue::into_bytes)
+                                    .ok_or(bterror!("Missing id"))?,
+                                token: response.pull(b"token").and_then(BencodedValue::into_bytes),
+                                nodes: response
                                     .pull(b"nodes")
                                     .and_then(BencodedValue::into_bytes)
                                     .map(<Vec<Node>>::from),
-                                response.pull(b"token").and_then(BencodedValue::into_bytes),
-                                response
+                                peers: response
                                     .pull(b"values")
                                     .and_then(BencodedValue::into_list)
                                     .map(|list| {
                                         list.into_iter()
                                             .filter_map(BencodedValue::into_bytes)
-                                            .map(SocketAddr::from)
-                                            .collect()
-                                    }),
-                            ) {
-                                (Some(id), None, None, None) => Response::Ping { id },
-                                (Some(id), Some(nodes), None, None) => {
-                                    Response::FindNode { id, nodes }
-                                }
-                                (Some(id), nodes, Some(token), values) => Response::GetPeers {
-                                    id,
-                                    token,
-                                    response: match (nodes, values) {
-                                        (Some(nodes), None) => GetPeersReturnData::Nodes(nodes),
-                                        (None, Some(values)) => GetPeersReturnData::Peers(values),
-                                        _ => {
-                                            return Err(bterror!(
-                                            "Invalid KRPC message: nodes and values at same time"
-                                        ))
-                                        }
-                                    },
-                                },
-                                _ => {
-                                    return Err(bterror!(
-                                        "Invalid KRPC message: invalid response data"
-                                    ))
-                                }
+                                            .map(<Result<SocketAddr, _>>::from)
+                                            .collect::<Result<Vec<_>, _>>()
+                                    })
+                                    .transpose()?,
                             }
                         } else {
                             return Err(bterror!("Invalid KRPC message: missing response data"));
                         }
-                    }),
+                    }
                     b"e" => {
                         if let Some(mut error) =
                             message.pull(b"e").and_then(BencodedValue::into_list)
@@ -401,7 +381,12 @@ impl From<BencodedValue> for Result<KrpcMessage, BitTorrentError> {
 #[derive(Debug, Clone)]
 pub enum DhtMessage {
     Query(Query),
-    Response(Response),
+    Response {
+        id: Bytes,
+        token: Option<Bytes>,
+        nodes: Option<Vec<Node>>,
+        peers: Option<Vec<SocketAddr>>,
+    },
     Error(usize, String),
 }
 
@@ -424,26 +409,4 @@ pub enum Query {
         info_hash: [u8; 20],
         token: Bytes,
     },
-}
-
-#[derive(Debug, Clone)]
-pub enum Response {
-    Ping {
-        id: Bytes,
-    },
-    FindNode {
-        id: Bytes,
-        nodes: Vec<Node>,
-    },
-    GetPeers {
-        id: Bytes,
-        token: Bytes,
-        response: GetPeersReturnData,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum GetPeersReturnData {
-    Nodes(Vec<Node>),
-    Peers(Vec<SocketAddr>),
 }

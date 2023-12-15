@@ -2,7 +2,7 @@
 
 use std::{
     fs,
-    net::{AddrParseError, SocketAddr, TcpStream},
+    net::{AddrParseError, SocketAddr, TcpStream, UdpSocket},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
@@ -23,9 +23,13 @@ use crate::{
         corkboard::{corkboard_download, Config},
         download_file,
     },
-    info::MetaInfo,
-    peer::{message::PeerMessageCodec, tcp::TcpPeer},
+    info::{Info, MetaInfo},
+    peer::{
+        message::{ExtensionHandshake, ExtensionMetadata, PeerMessageCodec},
+        tcp::TcpPeer,
+    },
     torrent_source::TorrentSource,
+    tracker::{dht::KrpcMessage, TrackerResponse},
     util::bytes_to_hex,
 };
 
@@ -55,7 +59,7 @@ enum Subcommand {
     DecodeHex(DecodeHexArgs),
     Info(InfoArgs),
     Peers(PeersArgs),
-    DhtQuery(DhtQueryArgs),
+    DhtPing(DhtPingArgs),
     Handshake(HandshakeArgs),
     #[command(name = "download_piece")]
     DownloadPiece(DownloadPieceArgs),
@@ -100,7 +104,7 @@ struct PeersArgs {
 }
 
 #[derive(Parser)]
-struct DhtQueryArgs {
+struct DhtPingArgs {
     /// File with torrent information
     #[arg(required = true)]
     torrent_source: String,
@@ -225,9 +229,13 @@ fn main() -> Result<(), BitTorrentError> {
             let mut cslice = &content[..];
             while cslice.len() > 0 {
                 let decoded = BencodedValue::ingest(&mut cslice)?;
-                println!("{:#?}", decoded);
-                dbg!(<Result<tracker::dht::KrpcMessage, _>>::from(decoded))
-                    .and_then(|msg| Ok(dbg!(BencodedValue::from(msg))))?;
+                dbg!(&decoded);
+                let _ = dbg!(<Result<MetaInfo, _>>::from(decoded.clone()));
+                let _ = dbg!(<Result<Info, _>>::from(decoded.clone()));
+                let _ = dbg!(<Result<KrpcMessage, _>>::from(decoded.clone()));
+                let _ = dbg!(<Result<ExtensionHandshake, _>>::from(decoded.clone()));
+                let _ = dbg!(<Result<ExtensionMetadata, _>>::from(decoded.clone()));
+                let _ = dbg!(<Result<TrackerResponse, _>>::from(decoded.clone()));
             }
         }
         Subcommand::Info(info_args) => {
@@ -253,18 +261,19 @@ fn main() -> Result<(), BitTorrentError> {
                 println!("{}", sock);
             }
         }
-        Subcommand::DhtQuery(dht_query_args) => {
-            let torrent_source = TorrentSource::from_string(&dht_query_args.torrent_source)?;
-            let info_hash = torrent_source.hash()?;
-            let peer_id = dht_query_args.peer_id.clone();
+        Subcommand::DhtPing(dht_ping_args) => {
+            let torrent_source = TorrentSource::from_string(&dht_ping_args.torrent_source)?;
+            // let info_hash = torrent_source.hash()?;
+            let peer_id = dht_ping_args.peer_id.clone();
             let mut dht = Dht::new(torrent_source, true);
             while let Some(node) = dht.nodes.pop_front() {
                 dbg!(&node);
-                let response = dht.exchange_message(
+                let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+                let response = Dht::exchange_message(
+                    &mut socket,
                     &node,
-                    DhtMessage::Query(Query::GetPeers {
-                        id: peer_id.clone().into(),
-                        info_hash,
+                    DhtMessage::Query(Query::Ping {
+                        id: peer_id.clone().into()
                     }),
                 );
                 match response {

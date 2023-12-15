@@ -3,7 +3,7 @@ use std::{
         mpsc::{Receiver, RecvTimeoutError},
         Arc, RwLock,
     },
-    time::Duration,
+    time::Duration, ops::ControlFlow,
 };
 
 use crate::{error::BitTorrentError, tracker::multimodal::Tracker, util::timestr};
@@ -17,7 +17,7 @@ const MAX_INTERVAL: Duration = Duration::from_secs(2 * 60);
 pub fn watchdog(
     corkboard: Arc<RwLock<Corkboard>>,
     alarm: Receiver<()>,
-    mut tracker: Tracker,
+    tracker: Tracker,
     config: Config,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
@@ -27,52 +27,37 @@ pub fn watchdog(
     };
 
     log(format!("Watchdog init"));
-    loop {
-        // update peer information
-        log(format!("Querying peer source"));
-        let interval = {
-            let (mut peers, interval) = tracker.query();
-            println!("{}", format!("Found {} peers", peers.len()));
-            corkboard
-                .write()
-                .map(|mut board| {
-                    board.peers.iter_mut().for_each(|(address, peer)| {
-                        match peers
-                            .iter()
-                            .enumerate()
-                            .find(|(_, peer)| *peer == address)
-                            .map(|(i, _)| i)
-                        {
-                            Some(i) => {
-                                peers.remove(i);
-                                peer.connection_attempts = 0;
-                                if !matches!(
-                                    peer.state,
-                                    PeerState::Error
-                                        | PeerState::Active(true)
-                                        | PeerState::Connecting
-                                ) {
-                                    peer.state = PeerState::Fresh;
-                                }
-                            }
-                            None => (),
-                        }
-                    });
-                    board
-                        .peers
-                        .extend(peers.into_iter().map(|address| (address, Peer::new())));
-                })
-                .unwrap();
-            Duration::from_secs(interval).min(MAX_INTERVAL)
-        };
+    for (new_peer, should_wait) in tracker {
 
-        // wait on watchdog alarm
-        log(format!("Waiting {}s", interval.as_secs()));
-        if matches!(
-            alarm.recv_timeout(interval),
-            Err(RecvTimeoutError::Disconnected) | Ok(_)
-        ) {
-            break;
+        // add the new peer
+        if let Ok(mut board) = corkboard.write() {
+            if let Some((_, board_peer)) =
+                board.peers.iter_mut().find(|(addr, _)| *addr == &new_peer)
+            {
+                board_peer.connection_attempts = 0;
+                if !matches!(
+                    board_peer.state,
+                    PeerState::Error | PeerState::Active(true) | PeerState::Connecting
+                ) {
+                    board_peer.state = PeerState::Fresh;
+                }
+            } else {
+                board.peers.insert(new_peer, Peer::new());
+            }
+        } else {
+            println!("Failed to acquire board");
+        }
+
+        // wait if requested to do so
+        if let ControlFlow::Break(wait_time) = should_wait {
+            let wait_time = wait_time.min(MAX_INTERVAL);
+            log(format!("Waiting {}s", wait_time.as_secs()));
+            if matches!(
+                alarm.recv_timeout(wait_time),
+                Err(RecvTimeoutError::Disconnected) | Ok(_)
+            ) {
+                break;
+            }
         }
     }
     log(format!("Exiting"));
