@@ -199,7 +199,7 @@ struct DownloadV2Args {
     port: u16,
 
     /// Number of workers
-    #[arg(short, long, default_value_t = 5)]
+    #[arg(short, long, default_value_t = 32)]
     workers: usize,
 
     /// Print verbose logging information

@@ -17,10 +17,11 @@ use crate::{
     bterror,
     error::BitTorrentError,
     info::MetaInfo,
+    multithread::SyncDoor,
     peer::PeerConnection,
     torrent_source::TorrentSource,
     tracker::{dht::Dht, multimodal::Tracker},
-    util::timestr, multithread::SyncDoor,
+    util::timestr,
 };
 
 use crossbeam::channel::unbounded;
@@ -197,7 +198,7 @@ pub fn corkboard_download<T: PeerConnection>(
 
     let tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
 
-    let (corkboard, meta_info) = thread::scope(|download_scope| {
+    let (data, meta_info) = thread::scope(|download_scope| {
         let (peer_send, peer_recv) = unbounded();
 
         let dht_killswitch = Arc::new(AtomicBool::new(false));
@@ -397,17 +398,10 @@ pub fn corkboard_download<T: PeerConnection>(
             tracker_notify.send(()).unwrap_or_default();
             dht_killswitch.store(true, Ordering::Relaxed);
 
-            Ok::<_, BitTorrentError>((corkboard, meta_info))
-        })
-    })?;
-
-    // coallate data
-    log(format!("Coallating data"));
-    let data = corkboard
-        .read()
-        .map(|board| {
-            Ok::<_, BitTorrentError>(
-                board
+            // coallate data
+            log(format!("Coallating data"));
+            let data = corkboard.read().map(|board| {
+                Ok::<_, BitTorrentError>(board
                     .pieces
                     .iter()
                     .map(|piece| match &piece.state {
@@ -417,10 +411,12 @@ pub fn corkboard_download<T: PeerConnection>(
                     .collect::<Result<Vec<_>, _>>()?
                     .into_iter()
                     .flatten()
-                    .collect::<Vec<u8>>(),
-            )
+                    .collect::<Vec<u8>>())
+            })?.unwrap();
+
+            Ok::<_, BitTorrentError>((data, meta_info))
         })
-        .unwrap()?;
+    })?;
 
     log(format!("Done"));
 

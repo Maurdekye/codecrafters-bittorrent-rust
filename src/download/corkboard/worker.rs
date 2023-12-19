@@ -178,10 +178,8 @@ where
                 .iter()
                 .any(|piece| matches!(piece.state, PieceState::Unfetched))
             {
-                log(format!("only unfetched"));
                 |piece: &Piece| matches!(piece.state, PieceState::Unfetched)
             } else {
-                log(format!("unfetched and in progress"));
                 |piece: &Piece| matches!(piece.state, PieceState::Unfetched | PieceState::InProgress)
             };
 
