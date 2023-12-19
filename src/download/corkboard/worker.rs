@@ -176,11 +176,13 @@ where
             let piece_valid_predicate = if board
                 .pieces
                 .iter()
-                .any(|piece| !matches!(piece.state, PieceState::Unfetched))
+                .any(|piece| matches!(piece.state, PieceState::Unfetched))
             {
+                log(format!("only unfetched"));
                 |piece: &Piece| matches!(piece.state, PieceState::Unfetched)
             } else {
-                |piece: &Piece| !matches!(piece.state, PieceState::Fetched(_))
+                log(format!("unfetched and in progress"));
+                |piece: &Piece| matches!(piece.state, PieceState::Unfetched | PieceState::InProgress)
             };
 
             // try to find a piece to download
@@ -256,7 +258,9 @@ where
 
                     // mark piece as unfetched
                     board.pieces.get_mut(piece_id).map(|piece| {
-                        piece.state = PieceState::Unfetched;
+                        if !matches!(piece.state, PieceState::Fetched(_)) {
+                            piece.state = PieceState::Unfetched;
+                        }
                     });
 
                     // try again
@@ -295,12 +299,12 @@ where
                         .map_or(Ok(LoopAction::Continue), |piece| {
                             if piece.hash == sha1_hash(&data) {
                                 // if hash matches, store data & keep peer for next loop
-                                if !config.verbose {
-                                    println!(
-                                        "Downloaded piece {piece_id} from {}",
-                                        connection.address()
-                                    );
-                                }
+                                // if !config.verbose {
+                                //     println!(
+                                //         "Downloaded piece {piece_id} from {}",
+                                //         connection.address()
+                                //     );
+                                // }
 
                                 piece.state = PieceState::Fetched(if should_save_to_disk {
                                     log(format!("Saving to disk"));

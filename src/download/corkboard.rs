@@ -394,7 +394,7 @@ pub fn corkboard_download<T: PeerConnection>(
             for alarm in tasks {
                 alarm.send(()).unwrap();
             }
-            tracker_notify.send(()).unwrap();
+            tracker_notify.send(()).unwrap_or_default();
             dht_killswitch.store(true, Ordering::Relaxed);
 
             Ok::<_, BitTorrentError>((corkboard, meta_info))

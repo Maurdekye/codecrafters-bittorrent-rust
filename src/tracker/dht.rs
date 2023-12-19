@@ -208,7 +208,7 @@ impl Dht {
                 socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
                 socket.set_write_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
 
-                for node in node_recv {
+                'outer: for node in node_recv {
                     let (peers, nodes, keep) = match Dht::exchange_message(
                         &mut socket,
                         &node,
@@ -245,7 +245,9 @@ impl Dht {
                     }
 
                     for addr in peers.unwrap_or_default() {
-                        addr_send.send(addr).unwrap();
+                        if addr_send.send(addr).is_err() {
+                            break 'outer;
+                        }
                     }
                 }
             });
