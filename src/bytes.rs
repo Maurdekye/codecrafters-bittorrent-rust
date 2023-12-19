@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
-    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    net::{SocketAddr, SocketAddrV4, SocketAddrV6, IpAddr, Ipv4Addr, Ipv6Addr},
     ops::{Deref, DerefMut},
     vec,
 };
@@ -121,6 +121,49 @@ impl From<Bytes> for Result<SocketAddr, BitTorrentError> {
             6 => Ok(SocketAddr::V4(SocketAddrV4::from(val))),
             18 => Ok(SocketAddr::V6(SocketAddrV6::from(val))),
             l => Err(bterror!("Invalid socket address: {l}")),
+        }
+    }
+}
+
+impl From<Bytes> for Ipv4Addr {
+    fn from(value: Bytes) -> Self {
+        u32::from_be_bytes(value[0..4].try_into().unwrap()).into()
+    }
+}
+
+impl From<Ipv4Addr> for Bytes {
+    fn from(value: Ipv4Addr) -> Self {
+        Bytes(value.octets().to_vec())
+    }
+}
+
+impl From<Bytes> for Ipv6Addr {
+    fn from(value: Bytes) -> Self {
+        u128::from_be_bytes(value[0..16].try_into().unwrap()).into()
+    }
+}
+
+impl From<Ipv6Addr> for Bytes {
+    fn from(value: Ipv6Addr) -> Self {
+        Bytes(value.octets().to_vec())
+    }
+}
+
+impl From<Bytes> for Result<IpAddr, BitTorrentError> {
+    fn from(val: Bytes) -> Self {
+        match val.len() {
+            4 => Ok(IpAddr::V4(Ipv4Addr::from(val))),
+            16 => Ok(IpAddr::V6(Ipv6Addr::from(val))),
+            l => Err(bterror!("Invalid ip address: {l}")),
+        }
+    }
+}
+
+impl From<IpAddr> for Bytes {
+    fn from(val: IpAddr) -> Self {
+        match val {
+            IpAddr::V4(v4) => Bytes::from(v4),
+            IpAddr::V6(v6) => Bytes::from(v6),
         }
     }
 }

@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use anyhow::Context;
 use chrono::Utc;
 use lazy_static::lazy_static;
@@ -281,4 +283,31 @@ where
         }
         None
     }
+}
+
+use std::fmt::Write;
+
+pub fn pretty_print_hex(data: &[u8]) -> String {
+    let mut output = String::new();
+    for (i, chunk) in data.chunks(16).enumerate() {
+        write!(&mut output, "{:08X}: ", i * 16).unwrap();
+        for &byte in chunk {
+            write!(&mut output, "{:02X} ", byte).unwrap();
+        }
+        if chunk.len() < 16 {
+            for _ in 0..16 - chunk.len() {
+                output.push_str("   ");
+            }
+        }
+        output.push_str(" |");
+        for &byte in chunk {
+            if byte.is_ascii_graphic() || byte == b' ' {
+                output.push(byte as char);
+            } else {
+                output.push('.');
+            }
+        }
+        output.push_str("|\n");
+    }
+    output
 }

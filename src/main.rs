@@ -41,6 +41,7 @@ mod info;
 mod magnet;
 mod multithread;
 mod peer;
+mod pool;
 mod torrent_source;
 mod tracker;
 mod util;
@@ -256,7 +257,7 @@ fn main() -> Result<(), BitTorrentError> {
         Subcommand::Peers(peers_args) => {
             let torrent_source = TorrentSource::from_string(&peers_args.torrent_source)?;
             let mut tracker = Tracker::new(torrent_source, peers_args.peer_id, peers_args.port)?;
-            let (peers, _) = tracker.query();
+            let (peers, _) = tracker.query().unwrap();
             for sock in peers {
                 println!("{}", sock);
             }
@@ -265,7 +266,7 @@ fn main() -> Result<(), BitTorrentError> {
             let torrent_source = TorrentSource::from_string(&dht_ping_args.torrent_source)?;
             // let info_hash = torrent_source.hash()?;
             let peer_id = dht_ping_args.peer_id.clone();
-            let mut dht = Dht::new(torrent_source, true);
+            let mut dht = Dht::new(torrent_source, peer_id.clone().into(), true);
             while let Some(node) = dht.nodes.pop_front() {
                 dbg!(&node);
                 let mut socket = UdpSocket::bind("0.0.0.0:0")?;

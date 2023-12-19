@@ -98,6 +98,7 @@ impl TcpPeer {
                 let length = u32::from_be_bytes(buf.try_into().unwrap());
                 self.log(format!("<.<.< {length}"));
                 let buf: Vec<u8> = self.read_n_bytes(length as usize)?;
+                // println!("{}", pretty_print_hex(&buf));
                 let response = self.decoder.decode(&buf)?;
                 self.log(cap_length(format!("<<<<< {response:?}"), 106));
                 Ok(response)
@@ -239,12 +240,12 @@ impl PeerConnection for TcpPeer {
             match connection.await_peer_message()? {
                 PeerMessage::Handshake(handshake) => {
                     // send extension handshake
-                    connection.log(format!("{:#?}", handshake));
+                    connection.log(format!("{:?}", handshake));
                     connection.send_peer_message(PeerMessage::Extension(
                         ExtensionMessage::Handshake(ExtensionHandshake {
                             messages: Some(HANDSHAKE_EXTENSION_CONFIG.clone()),
                             version: Some(bytes!(b"MaurdekyeBitTorrent/1.0.0")),
-                            yourip: Some(peer.into()),
+                            yourip: Some(peer.ip().into()),
                             reqq: Some(500),
                             ..Default::default()
                         }),
@@ -267,31 +268,27 @@ impl PeerConnection for TcpPeer {
                 PeerMessage::Extension(ExtensionMessage::Metadata(
                     ExtensionMetadata {
                         msg_type: 1,
-                        total_size,
+                        total_size: Some(total_size),
                         ..
                     },
-                    data,
+                    Some(data),
                 )) => {
-                    if let (Some(data), Some(total_size)) = (data, total_size) {
-                        meta_info_pieces.push(data);
-                        if meta_info_pieces.iter().flatten().count() < total_size as usize {
-                            // not all pieces acquired, ask for more
-                            connection.send_peer_message(PeerMessage::Extension(
-                                ExtensionMessage::Metadata(
-                                    ExtensionMetadata {
-                                        msg_type: 0,
-                                        piece: meta_info_pieces.len() as Number,
-                                        total_size: None,
-                                    },
-                                    None,
-                                ),
-                            ))?;
-                        } else {
-                            // mark meta_info as acquired
-                            meta_info_acquired = true;
-                        }
+                    meta_info_pieces.push(data);
+                    if meta_info_pieces.iter().flatten().count() < total_size as usize {
+                        // not all pieces acquired, ask for more
+                        connection.send_peer_message(PeerMessage::Extension(
+                            ExtensionMessage::Metadata(
+                                ExtensionMetadata {
+                                    msg_type: 0,
+                                    piece: meta_info_pieces.len() as Number,
+                                    total_size: None,
+                                },
+                                None,
+                            ),
+                        ))?;
                     } else {
-                        return Err(bterror!("Peer didn't send info"));
+                        // mark meta_info as acquired
+                        meta_info_acquired = true;
                     }
                 }
                 PeerMessage::Choke => connection.choked = true,
@@ -302,7 +299,6 @@ impl PeerConnection for TcpPeer {
             // request meta_info
             if recieved_extension_handshake
                 && meta_info.is_none()
-                && bitfield_source.is_some()
                 && !sent_initial_metadata_request
             {
                 connection.send_peer_message(PeerMessage::Extension(
@@ -351,9 +347,9 @@ impl PeerConnection for TcpPeer {
         let meta_info = self
             .meta_info()
             .ok_or(bterror!("Can't download a file without meta info!"))?;
-        let piece_offset = piece_id * meta_info.info.piece_length as u32;
+        let piece_offset = (piece_id as usize) * meta_info.info.piece_length;
         let chunk_size =
-            (meta_info.length() as u32 - piece_offset).min(meta_info.info.piece_length as u32);
+            (meta_info.length() - piece_offset).min(meta_info.info.piece_length) as u32;
 
         let mut chunks = (0..chunk_size)
             .step_by(CHUNK_SIZE as usize)

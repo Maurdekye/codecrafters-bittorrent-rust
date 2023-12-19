@@ -1,18 +1,24 @@
 #![allow(unused)]
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt::Display,
     fs::File,
+    iter::once,
     net::{AddrParseError, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket},
     ops::Deref,
     option,
     str::FromStr,
+    sync::{
+        Arc, Mutex, RwLock,
+    },
+    thread::Scope,
     time::Duration,
 };
 
 use hex::encode;
 use lazy_static::lazy_static;
 use regex::Match;
+use crossbeam::channel::{unbounded, Receiver};
 
 use crate::{
     bencode::{BencodedValue, Number},
@@ -33,7 +39,7 @@ lazy_static! {
 
 const DHT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, std::hash::Hash)]
 pub enum NodeAddress {
     Ip(SocketAddr),
     Domain(String),
@@ -61,7 +67,7 @@ impl ToSocketAddrs for NodeAddress {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, std::hash::Hash)]
 pub struct Node {
     id: Option<[u8; 20]>,
     address: NodeAddress,
@@ -112,10 +118,11 @@ pub struct Dht {
     pub nodes: VecDeque<Node>,
     socket: UdpSocket,
     verbose: bool,
+    peer_id: Bytes,
 }
 
 impl Dht {
-    pub fn new(torrent_source: TorrentSource, verbose: bool) -> Self {
+    pub fn new(torrent_source: TorrentSource, peer_id: Bytes, verbose: bool) -> Self {
         let dht = Self {
             torrent_source,
             nodes: BOOTSTRAP_DHT_NODES
@@ -128,6 +135,7 @@ impl Dht {
                 .collect(),
             socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
             verbose,
+            peer_id,
         };
         dht.socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT));
         dht
@@ -175,6 +183,74 @@ impl Dht {
         if self.verbose {
             println!("[{}] {}", timestr(), message);
         }
+    }
+
+    pub fn initialize<'b, 'c>(&mut self, workers: usize, scope: &'b Scope<'c, '_>) -> Receiver<SocketAddr> where 'b: 'c {
+        let (node_send, node_recv) = unbounded();
+        let (addr_send, addr_recv) = unbounded();
+
+        for node in self.nodes.iter() {
+            node_send.send(node.clone()).unwrap();
+        }
+
+        let seen_nodes = Arc::new(RwLock::new(HashSet::new()));
+
+        for i in 0..workers {
+            let node_send = node_send.clone();
+            let node_recv = node_recv.clone();
+            let addr_send = addr_send.clone();
+            let peer_id = self.peer_id.clone();
+            let info_hash = self.torrent_source.hash().unwrap().clone();
+            let marked_nodes = seen_nodes.clone();
+
+            scope.spawn(move || {
+                let mut socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+                socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
+                socket.set_write_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
+
+                for node in node_recv {
+                    let (peers, nodes, keep) = match Dht::exchange_message(
+                        &mut socket,
+                        &node,
+                        DhtMessage::Query(Query::GetPeers {
+                            id: peer_id.clone().into(),
+                            info_hash,
+                        }),
+                    ) {
+                        Ok(DhtMessage::Response { nodes, peers, .. }) => {
+                            if peers.as_ref().map_or(true, |peers| peers.is_empty()) {
+                                (peers, nodes, false)
+                            } else {
+                                (peers, nodes, true)
+                            }
+                        }
+                        _ => (None, None, false),
+                    };
+
+                    {
+                        let marked_nodes = marked_nodes.read().unwrap();
+                        for node in nodes
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|node| !marked_nodes.contains(node))
+                        {
+                            node_send.send(node).unwrap();
+                        }
+                    }
+                    if keep {
+                        node_send.send(node).unwrap();
+                    } else {
+                        let mut marked_nodes = marked_nodes.write().unwrap();
+                        marked_nodes.insert(node);
+                    }
+
+                    for addr in peers.unwrap_or_default() {
+                        addr_send.send(addr).unwrap();
+                    }
+                }
+            });
+        }
+        addr_recv
     }
 }
 

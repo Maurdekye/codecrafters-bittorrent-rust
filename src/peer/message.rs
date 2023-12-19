@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::iter::{empty, once};
-use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::Deref;
 
 use crate::bencode::{BencodedValue, Number};
@@ -80,9 +80,9 @@ pub struct ExtensionHandshake {
     pub messages: Option<HashMap<Bytes, Number>>,
     pub port: Option<u16>,
     pub version: Option<Bytes>,
-    pub yourip: Option<SocketAddr>,
-    pub ipv6: Option<SocketAddrV6>,
-    pub ipv4: Option<SocketAddrV4>,
+    pub yourip: Option<IpAddr>,
+    pub ipv6: Option<Ipv6Addr>,
+    pub ipv4: Option<Ipv4Addr>,
     pub reqq: Option<Number>,
     pub metadata_size: Option<Number>,
 }
@@ -99,7 +99,7 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
                             .into_iter()
                             .filter_map(|(k, v)| v.into_int().map(|i| (k, i)))
                             .collect::<HashMap<_, _>>();
-                        map.is_empty().then_some(map)
+                        (!map.is_empty()).then_some(map)
                     }),
                 port: handshake
                     .pull(b"p")
@@ -109,16 +109,16 @@ impl From<BencodedValue> for Result<ExtensionHandshake, BitTorrentError> {
                 yourip: handshake
                     .pull(b"yourip")
                     .and_then(BencodedValue::into_bytes)
-                    .map(<Result<SocketAddr, _>>::from)
+                    .map(<Result<IpAddr, _>>::from)
                     .transpose()?,
                 ipv6: handshake
                     .pull(b"ipv6")
                     .and_then(BencodedValue::into_bytes)
-                    .map(SocketAddrV6::from),
+                    .map(Ipv6Addr::from),
                 ipv4: handshake
                     .pull(b"ipv4")
                     .and_then(BencodedValue::into_bytes)
-                    .map(SocketAddrV4::from),
+                    .map(Ipv4Addr::from),
                 reqq: handshake.pull(b"reqq").and_then(BencodedValue::into_int),
                 metadata_size: handshake
                     .pull(b"metadata_size")
@@ -344,7 +344,7 @@ impl ExtensionMessageCodec {
             )?)),
             b"ut_metadata" => Ok(ExtensionMessage::Metadata(
                 <Result<_, _>>::from(BencodedValue::ingest(&mut bytes)?)?,
-                bytes.is_empty().then_some(bytes.to_vec()),
+                (!bytes.is_empty()).then_some(bytes.to_vec()),
             )),
             name => Err(bterror!(
                 "Unrecognized extension name: {}",

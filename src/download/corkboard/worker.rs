@@ -176,7 +176,7 @@ where
             let piece_valid_predicate = if board
                 .pieces
                 .iter()
-                .all(|piece| !matches!(piece.state, PieceState::Unfetched))
+                .any(|piece| !matches!(piece.state, PieceState::Unfetched))
             {
                 |piece: &Piece| matches!(piece.state, PieceState::Unfetched)
             } else {
