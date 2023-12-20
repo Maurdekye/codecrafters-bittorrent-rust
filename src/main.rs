@@ -355,7 +355,7 @@ fn main() -> Result<(), BitTorrentError> {
                     .with_context(|| "Error saving torrent file(s)")?;
                 println!(
                     "Downloaded {} to {}.",
-                    download_args.torrent_source,
+                    meta_info.info.name,
                     &download_args.output.to_str().unwrap()
                 );
                 Ok::<_, BitTorrentError>(())
