@@ -134,7 +134,7 @@ pub fn seeder(
                                             Some(Piece {
                                                 state: PieceState::Fetched(location),
                                                 ..
-                                            }) => location.clone().load()?,
+                                            }) => location.load()?,
                                             _ => {
                                                 return Err(bterror!(
                                                     "Piece {piece_id} is not fetched"

@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs::create_dir_all,
     net::SocketAddr,
@@ -9,12 +10,13 @@ use std::{
         mpsc::{channel, RecvTimeoutError},
         Arc, Mutex, RwLock,
     },
-    thread::{self},
+    thread::Scope,
     time::Duration,
 };
 
 use crate::{
     bterror,
+    data_proxy::DataProxy,
     error::BitTorrentError,
     info::MetaInfo,
     multithread::SyncDoor,
@@ -89,10 +91,10 @@ pub enum PieceLocation {
 }
 
 impl PieceLocation {
-    fn load(self) -> Result<Vec<u8>, BitTorrentError> {
+    pub fn load(&self) -> Result<Cow<Vec<u8>>, BitTorrentError> {
         match self {
-            Self::Memory(data) => Ok(data),
-            Self::Disk(path) => Ok(std::fs::read(path)?),
+            Self::Memory(data) => Ok(Cow::Borrowed(data)),
+            Self::Disk(path) => Ok(Cow::Owned(std::fs::read(path)?)),
         }
     }
 
@@ -186,239 +188,223 @@ impl Default for Config {
 /// fetched. They check it once before performing their download to determine which peer to
 /// connect to and which piece to acquire, and once afterwards to validate and submit their
 /// successful download to the board.
-pub fn corkboard_download<T: PeerConnection>(
+pub fn corkboard_download<'a, T: PeerConnection>(
     torrent_source: TorrentSource,
+    scope: &'a Scope<'a, '_>,
     config: Config,
-) -> Result<(Vec<u8>, MetaInfo), BitTorrentError> {
-    let log = |msg: String| {
-        if config.verbose {
+) -> Result<(DataProxy, MetaInfo), BitTorrentError> {
+    let verbose = config.verbose.clone();
+    let log = move |msg: String| {
+        if verbose {
             println!("[{}] {msg}", timestr())
         }
     };
 
     let tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
 
-    let (data, meta_info) = thread::scope(|download_scope| {
-        let (peer_send, peer_recv) = unbounded();
+    let (peer_send, peer_recv) = unbounded();
 
-        let dht_killswitch = Arc::new(AtomicBool::new(false));
-        let (tracker_notify, tracker_alarm) = channel::<()>();
+    let dht_killswitch = Arc::new(AtomicBool::new(false));
+    let (tracker_notify, tracker_alarm) = channel::<()>();
+    let download_finished = Arc::new(SyncDoor::new());
+    download_finished.close().unwrap();
 
-        // spawn tracker
-        {
-            let peer_send = peer_send.clone();
-            let alarm = Arc::new(Mutex::new(tracker_alarm));
-            download_scope.spawn(move || {
-                log(format!("Initializing tracker"));
-                for (new_peer, should_wait) in tracker {
-                    log(format!("New peer from tracker: {new_peer}"));
-                    peer_send.send(new_peer).unwrap();
+    // spawn tracker
+    {
+        let peer_send = peer_send.clone();
+        let alarm = Arc::new(Mutex::new(tracker_alarm));
+        scope.spawn(move || {
+            log(format!("Initializing tracker"));
+            for (new_peer, should_wait) in tracker {
+                log(format!("New peer from tracker: {new_peer}"));
+                peer_send.send(new_peer).unwrap();
 
-                    // wait if requested to do so
-                    if let ControlFlow::Break(wait_time) = should_wait {
-                        let wait_time = wait_time.min(MAX_INTERVAL);
-                        log(format!("Waiting {}s", wait_time.as_secs()));
-                        if matches!(
-                            alarm.lock().unwrap().recv_timeout(wait_time),
-                            Err(RecvTimeoutError::Disconnected) | Ok(_)
-                        ) {
-                            break;
-                        }
-                    }
-                }
-                log(format!("Trackers exhausted"));
-            });
-        }
-
-        // spawn dht
-        {
-            let peer_send = peer_send.clone();
-            let killswitch = dht_killswitch.clone();
-            let mut dht = Dht::new(
-                torrent_source.clone(),
-                config.peer_id.clone().into(),
-                config.verbose,
-            );
-            download_scope.spawn(move || {
-                log(format!("Initializing DHT"));
-                let dht_peers = dht.initialize(DHT_WORKERS, download_scope);
-                for peer in dht_peers {
-                    // log(format!("New peer from dht: {peer}"));
-                    peer_send.send(peer).unwrap();
-                    if killswitch.load(Ordering::Relaxed) {
+                // wait if requested to do so
+                if let ControlFlow::Break(wait_time) = should_wait {
+                    let wait_time = wait_time.min(MAX_INTERVAL);
+                    log(format!("Waiting {}s", wait_time.as_secs()));
+                    if matches!(
+                        alarm.lock().unwrap().recv_timeout(wait_time),
+                        Err(RecvTimeoutError::Disconnected) | Ok(_)
+                    ) {
                         break;
                     }
                 }
-            });
-        }
+            }
+            log(format!("Trackers exhausted"));
+        });
+    }
 
-        thread::scope(|metadata_discovery_scope| {
-            // get meta info
-            let peer_list = Arc::new(Mutex::new(Vec::new()));
-            let meta_info = match torrent_source {
-                TorrentSource::File(meta_info) => meta_info,
-                TorrentSource::Magnet(_) => {
-                    if !config.verbose {
-                        println!("Retrieving metadata");
-                    } else {
-                        log(format!("Retrieving metadata"));
-                    }
-                    let meta_info = Arc::new(RwLock::new(None::<MetaInfo>));
-                    let peer_search_killswitch = Arc::new(AtomicBool::new(false));
-                    let door = Arc::new(SyncDoor::new());
-                    door.close().unwrap();
-                    for _ in 0..config.workers {
-                        let meta_info = meta_info.clone();
-                        let peer_recv = peer_recv.clone();
-                        let torrent_source = torrent_source.clone();
-                        let config = config.clone();
-                        let peer_list = peer_list.clone();
-                        let peer_search_killswitch = peer_search_killswitch.clone();
-                        let door = door.clone();
-                        metadata_discovery_scope.spawn(move || {
-                            for peer in peer_recv {
-                                {
-                                    if meta_info.read().unwrap().is_some() {
-                                        break;
-                                    }
-                                }
-                                log(format!("[{}] Connecting to peer", peer));
-                                let peer_search_killswitch = peer_search_killswitch.clone();
-                                let found_meta_info: MetaInfo = match T::new(
-                                    peer,
-                                    torrent_source.clone(),
-                                    config.peer_id.clone(),
-                                    config.port,
-                                    config.verbose,
-                                    peer_search_killswitch.clone(),
-                                ) {
-                                    Ok(peer_connection) => peer_connection
-                                        .meta_info()
-                                        .expect("Meta info was not included")
-                                        .clone(),
-                                    Err(err) => {
-                                        log(format!(
-                                            "[{}] Failed to connect to peer: {}",
-                                            peer, err
-                                        ));
-                                        continue;
-                                    }
-                                };
-                                log(format!("[{}] Metadata located from peer", peer));
-                                peer_list.lock().unwrap().push(peer);
-                                {
-                                    if meta_info.read().unwrap().is_some() {
-                                        break;
-                                    } else {
-                                        meta_info.write().unwrap().replace(found_meta_info);
-                                        door.open().unwrap();
-                                    }
-                                }
-                            }
-                            peer_search_killswitch.store(true, Ordering::Relaxed);
-                            log(format!("Exiting"));
-                        });
-                    }
-                    door.wait().unwrap();
-                    let meta_info = meta_info
-                        .read()
-                        .unwrap()
-                        .clone()
-                        .expect("Meta info was not located");
-                    meta_info
+    // spawn dht
+    {
+        let peer_send = peer_send.clone();
+        let killswitch = dht_killswitch.clone();
+        let mut dht = Dht::new(
+            torrent_source.clone(),
+            config.peer_id.clone().into(),
+            config.verbose,
+        );
+        scope.spawn(move || {
+            log(format!("Initializing DHT"));
+            let dht_peers = dht.initialize(DHT_WORKERS, scope);
+            for peer in dht_peers {
+                // log(format!("New peer from dht: {peer}"));
+                peer_send.send(peer).unwrap();
+                if killswitch.load(Ordering::Relaxed) {
+                    break;
                 }
-            };
-
-            // create corkboard
-            log(format!("Initializing Corkboard"));
-            let corkboard: Arc<RwLock<Corkboard>> =
-                Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
-            if let Ok(mut board) = corkboard.write() {
-                board.peers.extend(
-                    peer_list
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|peer| (peer.clone(), Peer::new())),
-                );
             }
+        });
+    }
 
-            if !config.verbose {
-                println!("Starting download");
-            } else {
-                log(format!(
-                    "Preparing to download {} pieces",
-                    corkboard.clone().read().unwrap().pieces.len(),
-                ));
-            }
-
-            // spawn subtasks
-            log(format!("Starting subtasks"));
-            let tasks = [monitor::monitor, seeder::seeder].map(|task| {
-                let corkboard = corkboard.clone();
-                let (notify, alarm) = channel();
+    // get meta info
+    let peer_list = Arc::new(Mutex::new(Vec::new()));
+    let meta_info = match torrent_source {
+        TorrentSource::File(meta_info) => meta_info,
+        TorrentSource::Magnet(_) => {
+            println!("Retrieving metadata");
+            log(format!("Retrieving metadata"));
+            let meta_info = Arc::new(RwLock::new(None::<MetaInfo>));
+            let peer_search_killswitch = Arc::new(AtomicBool::new(false));
+            let door = Arc::new(SyncDoor::new());
+            door.close().unwrap();
+            for _ in 0..config.workers {
                 let meta_info = meta_info.clone();
+                let peer_recv = peer_recv.clone();
+                let torrent_source = torrent_source.clone();
                 let config = config.clone();
-                download_scope.spawn(move || task(corkboard, alarm, meta_info, config));
-                notify
-            });
-            {
-                let corkboard = corkboard.clone();
-                let config = config.clone();
-                download_scope.spawn(move || watchdog::watchdog(corkboard, peer_recv, config));
+                let peer_list = peer_list.clone();
+                let peer_search_killswitch = peer_search_killswitch.clone();
+                let door = door.clone();
+                scope.spawn(move || {
+                    for peer in peer_recv {
+                        {
+                            if meta_info.read().unwrap().is_some() {
+                                break;
+                            }
+                        }
+                        log(format!("[{}] Connecting to peer", peer));
+                        let peer_search_killswitch = peer_search_killswitch.clone();
+                        let found_meta_info: MetaInfo = match T::new(
+                            peer,
+                            torrent_source.clone(),
+                            config.peer_id.clone(),
+                            config.port,
+                            config.verbose,
+                            peer_search_killswitch.clone(),
+                        ) {
+                            Ok(peer_connection) => peer_connection
+                                .meta_info()
+                                .expect("Meta info was not included")
+                                .clone(),
+                            Err(err) => {
+                                log(format!("[{}] Failed to connect to peer: {}", peer, err));
+                                continue;
+                            }
+                        };
+                        log(format!("[{}] Metadata located from peer", peer));
+                        peer_list.lock().unwrap().push(peer);
+                        {
+                            if meta_info.read().unwrap().is_some() {
+                                break;
+                            } else {
+                                meta_info.write().unwrap().replace(found_meta_info);
+                                door.open().unwrap();
+                            }
+                        }
+                    }
+                    peer_search_killswitch.store(true, Ordering::Relaxed);
+                    log(format!("Exiting"));
+                });
             }
+            door.wait().unwrap();
+            let meta_info = meta_info
+                .read()
+                .unwrap()
+                .clone()
+                .expect("Meta info was not located");
+            meta_info
+        }
+    };
 
-            // start workers
-            log(format!("Starting workers"));
-            let workers = (0..config.workers)
-                .map(|worker_id| {
-                    let corkboard = corkboard.clone();
-                    let meta_info = meta_info.clone();
-                    let config = config.clone();
-                    download_scope
-                        .spawn(move || worker::worker::<T>(corkboard, worker_id, meta_info, config))
-                })
-                .collect::<Vec<_>>();
+    // create corkboard
+    log(format!("Initializing Corkboard"));
+    let corkboard: Arc<RwLock<Corkboard>> =
+        Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
+    if let Ok(mut board) = corkboard.write() {
+        board.peers.extend(
+            peer_list
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|peer| (peer.clone(), Peer::new())),
+        );
+    }
 
-            // wait for workers to finish
-            log(format!("Waiting for workers to finish"));
-            for worker in workers {
-                worker.join().unwrap()?;
-            }
+    println!("Downloading {}", meta_info.info.name);
+    log(format!(
+        "Preparing to download {} pieces",
+        corkboard.clone().read().unwrap().pieces.len(),
+    ));
 
-            if !config.verbose {
-                println!("Finished downloading");
-            }
+    // spawn subtasks
+    log(format!("Starting subtasks"));
+    let tasks = [monitor::monitor, seeder::seeder].map(|task| {
+        let corkboard = corkboard.clone();
+        let (notify, alarm) = channel();
+        let meta_info = meta_info.clone();
+        let config = config.clone();
+        scope.spawn(move || task(corkboard, alarm, meta_info, config));
+        notify
+    });
+    {
+        let corkboard = corkboard.clone();
+        let config = config.clone();
+        scope.spawn(move || watchdog::watchdog(corkboard, peer_recv, config));
+    }
 
-            // send kill signals to subtasks
-            log(format!("Killing subtasks"));
-            for alarm in tasks {
-                alarm.send(()).unwrap();
-            }
-            tracker_notify.send(()).unwrap_or_default();
-            dht_killswitch.store(true, Ordering::Relaxed);
+    // start workers
+    log(format!("Starting workers"));
+    for worker_id in 0..config.workers {
+        let corkboard = corkboard.clone();
+        let meta_info = meta_info.clone();
+        let download_finished = download_finished.clone();
+        let config = config.clone();
+        scope.spawn(move || {
+            worker::worker::<T>(corkboard, worker_id, meta_info, download_finished, config)
+        });
+    }
 
-            // coallate data
-            log(format!("Coallating data"));
-            let data = corkboard.read().map(|board| {
-                Ok::<_, BitTorrentError>(board
-                    .pieces
-                    .iter()
-                    .map(|piece| match &piece.state {
-                        PieceState::Fetched(data_location) => data_location.clone().load(),
-                        _ => Err(bterror!("Unfetched piece data remains!")),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<u8>>())
-            })?.unwrap();
+    // wait for workers to finish
+    log(format!("Waiting for workers to finish"));
+    download_finished.wait().unwrap();
 
-            Ok::<_, BitTorrentError>((data, meta_info))
+    println!("Finished downloading");
+
+    // send kill signals to subtasks
+    log(format!("Killing subtasks"));
+    for alarm in tasks {
+        alarm.send(()).unwrap();
+    }
+    tracker_notify.send(()).unwrap_or_default();
+    dht_killswitch.store(true, Ordering::Relaxed);
+
+    // coallate data
+    log(format!("Coallating data"));
+    let data = corkboard
+        .read()
+        .unwrap()
+        .pieces
+        .iter()
+        .map(|piece| match &piece.state {
+            PieceState::Fetched(data_location) => Ok(data_location.clone()),
+            _ => Err(bterror!("Unfetched piece data remains!")),
         })
-    })?;
+        .collect::<Result<Vec<PieceLocation>, _>>()?;
+
+    let proxy = DataProxy::new(data, meta_info.info.piece_length, meta_info.length());
 
     log(format!("Done"));
 
-    Ok((data, meta_info))
+    Ok((proxy, meta_info))
 }

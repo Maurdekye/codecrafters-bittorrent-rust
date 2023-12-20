@@ -5,6 +5,7 @@ use std::{
     net::{AddrParseError, SocketAddr, TcpStream, UdpSocket},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
+    thread,
     time::Duration,
 };
 
@@ -35,6 +36,7 @@ use crate::{
 
 mod bencode;
 mod bytes;
+mod data_proxy;
 mod download;
 mod error;
 mod info;
@@ -274,7 +276,7 @@ fn main() -> Result<(), BitTorrentError> {
                     &mut socket,
                     &node,
                     DhtMessage::Query(Query::Ping {
-                        id: peer_id.clone().into()
+                        id: peer_id.clone().into(),
                     }),
                 );
                 match response {
@@ -334,26 +336,30 @@ fn main() -> Result<(), BitTorrentError> {
             let torrent_source = TorrentSource::from_string(&download_args.torrent_source)?;
             // dbg!(&torrent_source);
             let temp_path: PathBuf = PathBuf::from("tmp/in-progress/").join(torrent_source.name());
-            let (full_file, meta_info) = corkboard_download::<TcpPeer>(
-                torrent_source,
-                Config {
-                    peer_id: download_args.peer_id,
-                    port: download_args.port,
-                    workers: download_args.workers,
-                    verbose: download_args.verbose,
-                    temp_path,
-                    ..Default::default()
-                },
-            )?;
-            println!("Saving to file");
-            meta_info
-                .save_to_path(&download_args.output, full_file)
-                .with_context(|| "Error saving torrent file(s)")?;
-            println!(
-                "Downloaded {} to {}.",
-                download_args.torrent_source,
-                &download_args.output.to_str().unwrap()
-            );
+            thread::scope(|scope| {
+                let (full_file, meta_info) = corkboard_download::<TcpPeer>(
+                    torrent_source,
+                    &scope,
+                    Config {
+                        peer_id: download_args.peer_id,
+                        port: download_args.port,
+                        workers: download_args.workers,
+                        verbose: download_args.verbose,
+                        temp_path,
+                        ..Default::default()
+                    },
+                )?;
+                println!("Saving to file");
+                meta_info
+                    .save_to_path(&download_args.output, full_file)
+                    .with_context(|| "Error saving torrent file(s)")?;
+                println!(
+                    "Downloaded {} to {}.",
+                    download_args.torrent_source,
+                    &download_args.output.to_str().unwrap()
+                );
+                Ok::<_, BitTorrentError>(())
+            })?;
         }
     }
     Ok(())

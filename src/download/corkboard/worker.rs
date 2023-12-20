@@ -11,7 +11,7 @@ use crate::{
     info::MetaInfo,
     peer::PeerConnection,
     torrent_source::TorrentSource,
-    util::{sha1_hash, sleep, timestr},
+    util::{sha1_hash, sleep, timestr}, multithread::SyncDoor,
 };
 
 use super::{Benchmark, Config, Corkboard, PeerState, Piece, PieceLocation, PieceState};
@@ -338,6 +338,7 @@ pub fn worker<T>(
     corkboard: Arc<RwLock<Corkboard>>,
     worker_id: usize,
     meta_info: MetaInfo,
+    finished_door: Arc<SyncDoor>,
     config: Config,
 ) -> Result<(), BitTorrentError>
 where
@@ -425,6 +426,7 @@ where
             }
             PeerSearchResult::PromptRefetch => continue,
             PeerSearchResult::Exit => {
+                finished_door.open().unwrap();
                 break;
             }
         };

@@ -1,5 +1,6 @@
 use std::{
     fs::{self, create_dir_all},
+    io::Read,
     path::PathBuf,
 };
 
@@ -194,23 +195,25 @@ impl MetaInfo {
     }
 
     /// Save the torrent data to the given path.
-    pub fn save_to_path(&self, path: &PathBuf, data: Vec<u8>) -> std::io::Result<()> {
+    pub fn save_to_path(&self, path: &PathBuf, mut data: impl Read) -> std::io::Result<()> {
         match &self.info.file_info {
             FileInfo::Length(_) => {
-                fs::write(path.join(&self.info.name), data)?;
+                let mut file = fs::File::create(path.join(&self.info.name))?;
+                std::io::copy(&mut data, &mut file)?;
             }
             FileInfo::Files(files) => {
-                let mut data_stream = &data[..];
                 let base_path = path.join(&self.info.name);
-                for file in files {
+                for file_metadata in files {
                     let mut file_path = base_path.clone();
-                    for path_part in &file.path {
+                    for path_part in &file_metadata.path {
                         file_path.push(path_part);
                     }
                     create_dir_all(file_path.parent().unwrap())?;
-                    let file_data = &data_stream[..file.length];
-                    fs::write(file_path, file_data)?;
-                    data_stream = &data_stream[file.length..];
+                    let mut file = fs::File::create(file_path)?;
+                    std::io::copy(
+                        &mut data.by_ref().take(file_metadata.length as u64),
+                        &mut file,
+                    )?;
                 }
             }
         }
