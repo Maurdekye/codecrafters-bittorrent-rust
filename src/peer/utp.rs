@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::Context;
 
-use crate::{error::BitTorrentError, info::MetaInfo, torrent_source::TorrentSource};
+use crate::{error::BitTorrentError, info::MetaInfo, torrent_source::TorrentSource, peer};
 
 use super::PeerConnection;
 
@@ -39,7 +39,7 @@ pub struct UtpPeer {
 
 impl UtpPeer {}
 
-impl PeerConnection for UtpPeer {
+impl<F: Fn(peer::Event) + Send + Clone> PeerConnection<F> for UtpPeer {
     type Error = BitTorrentError;
 
     fn new(
@@ -49,6 +49,7 @@ impl PeerConnection for UtpPeer {
         _port: u16,
         _verbose: bool,
         _killswitch: Arc<AtomicBool>,
+        _event_callback: F,
     ) -> Result<Self, Self::Error>
     where
         Self: Sized,

@@ -14,7 +14,7 @@ macro_rules! bterror {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BitTorrentError {
     details: String,
 }

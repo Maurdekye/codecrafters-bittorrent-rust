@@ -62,7 +62,7 @@ enum Subcommand {
     DecodeHex(DecodeHexArgs),
     Info(InfoArgs),
     Peers(PeersArgs),
-    DhtPing(DhtPingArgs),
+    // DhtPing(DhtPingArgs),
     Handshake(HandshakeArgs),
     #[command(name = "download_piece")]
     DownloadPiece(DownloadPieceArgs),
@@ -258,36 +258,36 @@ fn main() -> Result<(), BitTorrentError> {
         }
         Subcommand::Peers(peers_args) => {
             let torrent_source = TorrentSource::from_string(&peers_args.torrent_source)?;
-            let mut tracker = Tracker::new(torrent_source, peers_args.peer_id, peers_args.port)?;
+            let mut tracker = Tracker::new(torrent_source, peers_args.peer_id, peers_args.port, &|_| {})?;
             let (peers, _) = tracker.query().unwrap();
             for sock in peers {
                 println!("{}", sock);
             }
         }
-        Subcommand::DhtPing(dht_ping_args) => {
-            let torrent_source = TorrentSource::from_string(&dht_ping_args.torrent_source)?;
-            // let info_hash = torrent_source.hash()?;
-            let peer_id = dht_ping_args.peer_id.clone();
-            let mut dht = Dht::new(torrent_source, peer_id.clone().into(), true);
-            while let Some(node) = dht.nodes.pop_front() {
-                dbg!(&node);
-                let mut socket = UdpSocket::bind("0.0.0.0:0")?;
-                let response = Dht::exchange_message(
-                    &mut socket,
-                    &node,
-                    DhtMessage::Query(Query::Ping {
-                        id: peer_id.clone().into(),
-                    }),
-                );
-                match response {
-                    Ok(message) => {
-                        dbg!(message);
-                        break;
-                    }
-                    Err(err) => println!("Error: {}", err),
-                }
-            }
-        }
+        // Subcommand::DhtPing(dht_ping_args) => {
+        //     let torrent_source = TorrentSource::from_string(&dht_ping_args.torrent_source)?;
+        //     // let info_hash = torrent_source.hash()?;
+        //     let peer_id = dht_ping_args.peer_id.clone();
+        //     let mut dht = Dht::new(torrent_source, peer_id.clone().into(), true, &|_| {});
+        //     while let Some(node) = dht.nodes.pop_front() {
+        //         dbg!(&node);
+        //         let mut socket = UdpSocket::bind("0.0.0.0:0")?;
+        //         let response = Dht::<impl Fn(tracker::dht::Event)>::exchange_message(
+        //             &mut socket,
+        //             &node,
+        //             DhtMessage::Query(Query::Ping {
+        //                 id: peer_id.clone().into(),
+        //             }),
+        //         );
+        //         match response {
+        //             Ok(message) => {
+        //                 dbg!(message);
+        //                 break;
+        //             }
+        //             Err(err) => println!("Error: {}", err),
+        //         }
+        //     }
+        // }
         Subcommand::Handshake(handshake_args) => {
             let mut connection = TcpPeer {
                 address: handshake_args.peer,
@@ -336,6 +336,7 @@ fn main() -> Result<(), BitTorrentError> {
             let torrent_source = TorrentSource::from_string(&download_args.torrent_source)?;
             // dbg!(&torrent_source);
             let temp_path: PathBuf = PathBuf::from("tmp/in-progress/").join(torrent_source.name());
+            let callback = move |event| {};
             thread::scope(|scope| {
                 let (full_file, meta_info) = corkboard_download::<TcpPeer>(
                     torrent_source,
@@ -348,6 +349,7 @@ fn main() -> Result<(), BitTorrentError> {
                         temp_path,
                         ..Default::default()
                     },
+                    &callback,
                 )?;
                 println!("Saving to file");
                 meta_info

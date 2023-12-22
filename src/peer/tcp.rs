@@ -22,6 +22,7 @@ use crate::{
     info::MetaInfo,
     torrent_source::TorrentSource,
     util::{bytes_to_hex, cap_length, sha1_hash, timestr},
+    peer,
 };
 
 use super::{
@@ -64,7 +65,7 @@ lazy_static! {
 }
 
 #[derive(Debug)]
-pub struct TcpPeer {
+pub struct TcpPeer<F> where F: Fn(peer::Event) + Send + Clone {
     #[allow(unused)]
     pub address: SocketAddr,
     pub torrent_source: TorrentSource,
@@ -78,9 +79,10 @@ pub struct TcpPeer {
     pub encoder: PeerMessageCodec,
     pub decoder: PeerMessageCodec,
     pub choked: bool,
+    event_callback: F
 }
 
-impl TcpPeer {
+impl<F: Fn(peer::Event) + Send + Clone> TcpPeer<F> {
     /// Wait for a peer message to arrive from the peer and return it.
     pub fn await_peer_message(&mut self) -> Result<PeerMessage, BitTorrentError> {
         self.log("<...<");
@@ -146,6 +148,7 @@ impl TcpPeer {
             encoder: self.encoder.clone(),
             decoder: self.decoder.clone(),
             choked: self.choked,
+            event_callback: self.event_callback.clone(),
         })
     }
 
@@ -187,7 +190,7 @@ impl TcpPeer {
     }
 }
 
-impl PeerConnection for TcpPeer {
+impl<F: Fn(peer::Event) + Send + Clone> PeerConnection<F> for TcpPeer<F> {
     type Error = BitTorrentError;
 
     /// Create a new peer connection.
@@ -198,7 +201,8 @@ impl PeerConnection for TcpPeer {
         port: u16,
         verbose: bool,
         killswitch: Arc<AtomicBool>,
-    ) -> Result<TcpPeer, BitTorrentError> {
+        event_callback: F
+    ) -> Result<TcpPeer<F>, BitTorrentError> {
         let handshake = PeerMessage::Handshake(HandshakeMessage::new(&torrent_source, &peer_id)?);
 
         let mut connection = TcpPeer {
@@ -215,6 +219,7 @@ impl PeerConnection for TcpPeer {
             encoder: PeerMessageCodec::new(CODEC_EXTENSION_CONFIG.clone()),
             decoder: PeerMessageCodec::default(),
             choked: true,
+            event_callback,
         };
 
         connection.stream.set_read_timeout(connection.timeout)?;

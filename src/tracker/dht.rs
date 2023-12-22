@@ -8,17 +8,15 @@ use std::{
     ops::Deref,
     option,
     str::FromStr,
-    sync::{
-        Arc, Mutex, RwLock,
-    },
+    sync::{Arc, Mutex, RwLock},
     thread::Scope,
     time::Duration,
 };
 
+use crossbeam::channel::{unbounded, Receiver};
 use hex::encode;
 use lazy_static::lazy_static;
 use regex::Match;
-use crossbeam::channel::{unbounded, Receiver};
 
 use crate::{
     bencode::{BencodedValue, Number},
@@ -112,17 +110,45 @@ impl From<Vec<Node>> for Bytes {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum Event {
+    Created,
+    Start,
+    Worker(usize, WorkerEvent),
+}
+
+#[derive(Clone, Debug)]
+pub enum WorkerEvent {
+    Start,
+    NodeQuery(Node),
+    NodeResponse(Option<Vec<Node>>, Option<Vec<SocketAddr>>),
+    Finish,
+}
+
 #[derive(Debug)]
-pub struct Dht {
+pub struct Dht<F>
+where
+    F: Fn(Event) + Send + Clone,
+{
     pub torrent_source: TorrentSource,
     pub nodes: VecDeque<Node>,
     socket: UdpSocket,
     verbose: bool,
     peer_id: Bytes,
+    event_callback: F,
 }
 
-impl Dht {
-    pub fn new(torrent_source: TorrentSource, peer_id: Bytes, verbose: bool) -> Self {
+impl<F: Fn(Event) + Send + Clone> Dht<F> {
+    pub fn new<'a>(
+        torrent_source: TorrentSource,
+        peer_id: Bytes,
+        verbose: bool,
+        event_callback: F,
+    ) -> Self
+    where
+        F: 'a,
+    {
+        event_callback(Event::Created);
         let dht = Self {
             torrent_source,
             nodes: BOOTSTRAP_DHT_NODES
@@ -136,6 +162,7 @@ impl Dht {
             socket: UdpSocket::bind("0.0.0.0:0").unwrap(),
             verbose,
             peer_id,
+            event_callback,
         };
         dht.socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT));
         dht
@@ -185,7 +212,17 @@ impl Dht {
         }
     }
 
-    pub fn initialize<'b, 'c>(&mut self, workers: usize, scope: &'b Scope<'c, '_>) -> Receiver<SocketAddr> where 'b: 'c {
+    pub fn initialize<'b, 'c>(
+        &mut self,
+        workers: usize,
+        scope: &'b Scope<'c, '_>,
+    ) -> Receiver<SocketAddr>
+    where
+        'b: 'c,
+        F: 'c,
+    {
+        (self.event_callback)(Event::Start);
+
         let (node_send, node_recv) = unbounded();
         let (addr_send, addr_recv) = unbounded();
 
@@ -202,14 +239,19 @@ impl Dht {
             let peer_id = self.peer_id.clone();
             let info_hash = self.torrent_source.hash().unwrap().clone();
             let marked_nodes = seen_nodes.clone();
+            let event_callback = self.event_callback.clone();
 
             scope.spawn(move || {
+                let event_callback = move |event| event_callback(Event::Worker(i, event));
                 let mut socket = UdpSocket::bind("0.0.0.0:0").unwrap();
                 socket.set_read_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
                 socket.set_write_timeout(Some(DHT_QUERY_TIMEOUT)).unwrap();
 
+                event_callback(WorkerEvent::Start);
+
                 'outer: for node in node_recv {
-                    let (peers, nodes, keep) = match Dht::exchange_message(
+                    event_callback(WorkerEvent::NodeQuery(node.clone()));
+                    let (peers, nodes, keep) = match Dht::<F>::exchange_message(
                         &mut socket,
                         &node,
                         DhtMessage::Query(Query::GetPeers {
@@ -218,6 +260,7 @@ impl Dht {
                         }),
                     ) {
                         Ok(DhtMessage::Response { nodes, peers, .. }) => {
+                            event_callback(WorkerEvent::NodeResponse(nodes.clone(), peers.clone()));
                             if peers.as_ref().map_or(true, |peers| peers.is_empty()) {
                                 (peers, nodes, false)
                             } else {
@@ -250,6 +293,8 @@ impl Dht {
                         }
                     }
                 }
+
+                event_callback(WorkerEvent::Finish);
             });
         }
         addr_recv

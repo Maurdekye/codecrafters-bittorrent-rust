@@ -9,11 +9,17 @@ use crossbeam::channel::Receiver;
 
 use super::{Config, Corkboard, Peer, PeerState};
 
+#[derive(Clone, Debug)]
+pub enum Event {
+    Start,
+}
+
 /// Watchdog thread: periodically fetches and updates the peer list by contacting the tracker
 pub fn watchdog(
     corkboard: Arc<RwLock<Corkboard>>,
     peer_source: Receiver<SocketAddr>,
     config: Config,
+    event_callback: impl Fn(Event) + Send + Clone,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
         if config.verbose {

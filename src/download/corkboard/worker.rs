@@ -9,9 +9,10 @@ use std::{
 use crate::{
     error::BitTorrentError,
     info::MetaInfo,
-    peer::PeerConnection,
+    multithread::SyncDoor,
+    peer::{self, PeerConnection, tcp::TcpPeer},
     torrent_source::TorrentSource,
-    util::{sha1_hash, sleep, timestr}, multithread::SyncDoor,
+    util::{sha1_hash, sleep, timestr},
 };
 
 use super::{Benchmark, Config, Corkboard, PeerState, Piece, PieceLocation, PieceState};
@@ -27,9 +28,9 @@ const MAX_MEMORY_SIZE: usize = 52428800; // 50 MB
 /// maximum reconnection attempts to be made to a given peer
 // const MAX_RECONNECT_ATTEMPTS: usize = 5;
 
-enum PeerSearchResult<T: PeerConnection> {
+enum PeerSearchResult<F: Fn(peer::Event) + Send + Clone> {
     ConnectNew(SocketAddr),
-    Reuse(T),
+    Reuse(TcpPeer<F>),
     WaitThenRefetch(Duration),
     PromptRefetch,
     Exit,
@@ -40,18 +41,42 @@ enum LoopAction {
     Pass,
 }
 
+#[derive(Clone, Debug)]
+pub enum Event {
+    Start,
+    Peer(peer::Event),
+    NewPeer(SocketAddr),
+    ConnectionSuccess(SocketAddr),
+    ConnectionFailure(SocketAddr),
+    Piece(usize, PieceEvent),
+    Exit,
+}
+
+#[derive(Clone, Debug)]
+pub enum PieceEvent {
+    Chosen,
+    DownloadFinished,
+    DownloadFailed(BitTorrentError),
+    DownloadSucceeded(usize),
+    HashMismatch {
+        expected: [u8; 20],
+        actual: [u8; 20],
+    },
+    Stored,
+}
+
 /// mutual exclusion zone 1:
 /// * check if all pieces are downloaded
 /// * review existing peer to see if it's okay to reuse or not
 /// * find a new peer that's ready to be connected to if there is no existing peer
-fn search_for_peer<T, F>(
+fn search_for_peer<F, FP>(
     corkboard: &Arc<RwLock<Corkboard>>,
-    active_connection: Option<T>,
+    active_connection: Option<TcpPeer<FP>>,
     uses: usize,
     log: F,
-) -> PeerSearchResult<T>
+) -> PeerSearchResult<FP>
 where
-    T: PeerConnection,
+    FP: Fn(peer::Event) + Send + Clone,
     F: Fn(String),
 {
     corkboard
@@ -158,13 +183,14 @@ where
 
 /// mutual exclusion zone 2:
 /// * attempt to find a new piece to download
-fn find_next_piece<T, F>(
+fn find_next_piece<T, F, FP>(
     corkboard: &Arc<RwLock<Corkboard>>,
     connection: &T,
     log: F,
 ) -> Option<usize>
 where
-    T: PeerConnection,
+    FP: Fn(peer::Event) + Send + Clone,
+    T: PeerConnection<FP>,
     F: Fn(String),
 {
     corkboard
@@ -180,7 +206,9 @@ where
             {
                 |piece: &Piece| matches!(piece.state, PieceState::Unfetched)
             } else {
-                |piece: &Piece| matches!(piece.state, PieceState::Unfetched | PieceState::InProgress)
+                |piece: &Piece| {
+                    matches!(piece.state, PieceState::Unfetched | PieceState::InProgress)
+                }
             };
 
             // try to find a piece to download
@@ -222,18 +250,18 @@ where
 /// * update the peer's performance statistics
 /// * check the downloaded data's hash
 /// * store the downloaded data
-fn finalize_download<T, F>(
+fn finalize_download<F, FP>(
     corkboard: &Arc<RwLock<Corkboard>>,
-    download_result: Result<Vec<u8>, T::Error>,
+    download_result: Result<Vec<u8>, BitTorrentError>,
     download_duration: usize,
     piece_id: usize,
-    connection: &T,
+    connection: &TcpPeer<FP>,
     log: F,
     config: &Config,
+    event_callback: impl Fn(PieceEvent) + Send + Clone,
 ) -> Result<LoopAction, BitTorrentError>
 where
-    T: PeerConnection,
-    T::Error: Error,
+    FP: Fn(peer::Event) + Send + Clone,
     F: Fn(String),
 {
     corkboard
@@ -242,6 +270,7 @@ where
             match download_result {
                 // download failed
                 Err(err) => {
+                    event_callback(PieceEvent::DownloadFailed(err.clone()));
                     log(format!(
                         "Failed to download piece {piece_id} from {}: {err}",
                         connection.address()
@@ -267,6 +296,7 @@ where
 
                 // download succeeded
                 Ok(data) => {
+                    event_callback(PieceEvent::DownloadSucceeded(data.len()));
                     log(format!(
                         "Finished downloading piece {piece_id} from {}",
                         connection.address()
@@ -295,7 +325,8 @@ where
                         .pieces
                         .get_mut(piece_id)
                         .map_or(Ok(LoopAction::Continue), |piece| {
-                            if piece.hash == sha1_hash(&data) {
+                            let hash: [u8; 20] = sha1_hash(&data);
+                            if piece.hash == hash {
                                 // if hash matches, store data & keep peer for next loop
                                 // if !config.verbose {
                                 //     println!(
@@ -314,6 +345,7 @@ where
                                     log(format!("Saving to memory"));
                                     PieceLocation::Memory(data)
                                 });
+                                event_callback(PieceEvent::Stored);
                                 Ok(LoopAction::Pass)
                             } else {
                                 log(format!(
@@ -322,6 +354,10 @@ where
 
                                 // if hash does not match, mark piece as unfetched
                                 piece.state = PieceState::Unfetched;
+                                event_callback(PieceEvent::HashMismatch {
+                                    expected: piece.hash,
+                                    actual: hash,
+                                });
                                 Ok(LoopAction::Continue)
                             }
                         })
@@ -334,15 +370,16 @@ where
 /// Worker thread: connects to peers and downloads pieces from them
 /// * `corkboard`: shared corkboard for coordinating peer connections and downloaded pieces
 /// * `worker_id`: worker id number
-pub fn worker<T>(
+pub fn worker<F>(
     corkboard: Arc<RwLock<Corkboard>>,
     worker_id: usize,
     meta_info: MetaInfo,
     finished_door: Arc<SyncDoor>,
     config: Config,
+    event_callback: impl Fn(Event) + Send + Clone,
 ) -> Result<(), BitTorrentError>
 where
-    T: PeerConnection,
+    F: Fn(peer::Event) + Send + Clone,
 {
     let log = |msg: String| {
         if config.verbose {
@@ -354,7 +391,7 @@ where
 
     log(format!("Worker init"));
 
-    let mut active_connection: Option<T> = None;
+    let mut active_connection: Option<TcpPeer<F>> = None;
     let mut uses = 0;
 
     loop {
@@ -365,21 +402,27 @@ where
         let mut connection = match peer_search_result {
             PeerSearchResult::ConnectNew(address) => {
                 // try to connect to the new peer
-                let connection_result = T::new(
-                    address.clone(),
-                    TorrentSource::File(meta_info.clone()),
-                    config.peer_id.clone(),
-                    config.port,
-                    config.verbose,
-                    corkboard
-                        .read()
-                        .map(|board| board.finishing.clone())
-                        .unwrap(),
-                );
+                event_callback(Event::NewPeer(address.clone()));
+                let connection_result = {
+                    let event_callback = event_callback.clone();
+                    TcpPeer::new(
+                        address.clone(),
+                        TorrentSource::File(meta_info.clone()),
+                        config.peer_id.clone(),
+                        config.port,
+                        config.verbose,
+                        corkboard
+                            .read()
+                            .map(|board| board.finishing.clone())
+                            .unwrap(),
+                        move |event| event_callback(Event::Peer(event)),
+                    )
+                };
 
                 match connection_result {
                     // if successful, mark peer as active & claimed
                     Ok(connection) => {
+                        event_callback(Event::ConnectionSuccess(address.clone()));
                         log(format!("Connected to {address}"));
                         uses = 0;
                         corkboard
@@ -396,6 +439,7 @@ where
 
                     // if unsuccessful, mark peer as errored and try another one
                     Err(err) => {
+                        event_callback(Event::ConnectionFailure(address.clone()));
                         corkboard
                             .write()
                             .map(|mut board| {
@@ -426,6 +470,7 @@ where
             }
             PeerSearchResult::PromptRefetch => continue,
             PeerSearchResult::Exit => {
+                event_callback(Event::Exit);
                 finished_door.open().unwrap();
                 break;
             }
@@ -436,6 +481,13 @@ where
             Some(piece) => piece,
             None => continue,
         };
+
+        let piece_event_callback = {
+            let event_callback = event_callback.clone();
+            move |event| event_callback(Event::Piece(piece_id, event))
+        };
+
+        piece_event_callback(PieceEvent::Chosen);
 
         log(format!(
             "Downloading piece {piece_id} from {}",
@@ -450,6 +502,8 @@ where
             .unwrap()
             .as_millis() as usize;
 
+        piece_event_callback(PieceEvent::DownloadFinished);
+
         // ! mutual exclusion zone 3: finalize & store the downloaded piece
         if matches!(
             finalize_download(
@@ -459,7 +513,8 @@ where
                 piece_id,
                 &connection,
                 log,
-                &config
+                &config,
+                piece_event_callback,
             )?,
             LoopAction::Continue
         ) {

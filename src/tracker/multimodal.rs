@@ -27,35 +27,95 @@ lazy_static! {
     static ref UDP_TRACKER_RE: Regex = Regex::new(r"udp://([^:]+:\d+)(/announce)?").unwrap();
 }
 
-pub struct Tracker {
+#[derive(Clone, Debug)]
+pub enum Event {
+    Created,
+    CycledTracker(TrackerConnectionTypeEvent),
+    Query(TrackerConnectionTypeEvent, QueryEvent),
+}
+
+#[derive(Clone, Debug)]
+pub enum TrackerConnectionTypeEvent {
+    Http(String),
+    Udp(SocketAddr),
+    None,
+}
+
+#[derive(Clone, Debug)]
+pub enum QueryEvent {
+    Start,
+    Http(HttpQueryEvent),
+    Udp(UdpQueryEvent),
+}
+
+#[derive(Clone, Debug)]
+pub enum HttpQueryEvent {
+    Start,
+    Queried,
+    SuccessResponse(PeerAnnounceResponse),
+    FailureResponse(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum UdpQueryEvent {
+    Start,
+    Connect,
+    Announce,
+    AnnounceResponse(PeerAnnounceResponse),
+}
+
+#[derive(Clone, Debug)]
+pub struct PeerAnnounceResponse {
+    pub interval: Duration,
+    pub peers: Vec<SocketAddr>,
+}
+
+impl TrackerConnectionTypeEvent {
+    fn from_tracker_connection(connection: &TrackerConnection) -> TrackerConnectionTypeEvent {
+        match connection {
+            TrackerConnection::Http(url) => TrackerConnectionTypeEvent::Http(url.clone()),
+            TrackerConnection::Udp(url) => {
+                TrackerConnectionTypeEvent::Udp(url.connection.peer_addr().unwrap())
+            }
+            TrackerConnection::None => TrackerConnectionTypeEvent::None,
+        }
+    }
+}
+
+pub struct Tracker<F>
+where
+    F: Fn(Event) + Send + Clone,
+{
     pub torrent_source: TorrentSource,
     active_connection: TrackerConnection,
     peers: VecDeque<SocketAddr>,
     pub trackers: VecDeque<String>,
     pub peer_id: String,
     pub port: u16,
+    event_callback: F,
 }
 
-impl Tracker {
+impl<F: Fn(Event) + Send + Clone> Tracker<F> {
     pub fn new(
         torrent_source: TorrentSource,
         peer_id: String,
         port: u16,
-    ) -> Result<Tracker, BitTorrentError> {
+        event_callback: F,
+    ) -> Result<Tracker<F>, BitTorrentError> {
         let mut trackers: VecDeque<String> = torrent_source.trackers().into();
+        event_callback(Event::Created);
         Ok(Tracker {
-            active_connection: Tracker::_next_tracker(&mut trackers),
+            active_connection: Tracker::<F>::_next_tracker(&mut trackers),
             peers: VecDeque::new(),
             trackers,
             torrent_source,
             peer_id,
             port,
+            event_callback,
         })
     }
 
-    fn _next_tracker(
-        trackers: &mut VecDeque<String>,
-    ) -> TrackerConnection {
+    fn _next_tracker(trackers: &mut VecDeque<String>) -> TrackerConnection {
         loop {
             match trackers.pop_front() {
                 Some(url) => match TrackerConnection::new(url.clone()) {
@@ -68,13 +128,24 @@ impl Tracker {
     }
 
     fn cycle_trackers(&mut self) {
-        self.active_connection = Tracker::_next_tracker(&mut self.trackers);
+        self.active_connection = Tracker::<F>::_next_tracker(&mut self.trackers);
+        (self.event_callback)(Event::CycledTracker(
+            TrackerConnectionTypeEvent::from_tracker_connection(&self.active_connection),
+        ));
     }
 
     fn _query(&mut self) -> Result<Option<(Vec<SocketAddr>, Duration)>, BitTorrentError> {
+        let active_connection =
+            TrackerConnectionTypeEvent::from_tracker_connection(&self.active_connection);
+        let event_callback = self.event_callback.clone();
+        let event_callback = move |event| event_callback(Event::Query(active_connection, event));
+        (event_callback.clone())(QueryEvent::Start);
         match &mut self.active_connection {
             TrackerConnection::Http(announce) => {
+                let event_callback = move |event| event_callback(QueryEvent::Http(event));
                 let client = reqwest::blocking::Client::new();
+
+                (event_callback.clone())(HttpQueryEvent::Start);
 
                 let raw_body = client
                     .get(format!(
@@ -113,26 +184,41 @@ impl Tracker {
                     .with_context(|| "Error decoding request response")?
                     .to_vec();
 
+                (event_callback.clone())(HttpQueryEvent::Queried);
+
                 match <Result<_, _>>::from(BencodedValue::ingest(&mut &raw_body[..])?)? {
                     TrackerResponse::Success { interval, peers } => {
-                        Ok(Some((peers, Duration::from_secs(interval as u64))))
+                        (event_callback.clone())(HttpQueryEvent::SuccessResponse(
+                            PeerAnnounceResponse {
+                                interval,
+                                peers: peers.clone(),
+                            },
+                        ));
+                        Ok(Some((peers, interval)))
                     }
                     TrackerResponse::Failure { failure_reason } => {
+                        event_callback(HttpQueryEvent::FailureResponse(failure_reason.to_string()));
                         Err(bterror!("Tracker query failure: {}", failure_reason))
                     }
                 }
             }
             TrackerConnection::Udp(udp_connection) => {
+                let event_callback = |event| event_callback(QueryEvent::Udp(event));
+                (event_callback.clone())(UdpQueryEvent::Start);
                 if udp_connection.last_connection.map_or(true, |time| {
                     SystemTime::now().duration_since(time).unwrap().as_secs() > 60
                 }) {
+                    (event_callback.clone())(UdpQueryEvent::Connect);
                     udp_connection.connect()?;
                 }
-                Ok(Some(udp_connection.annouce(
-                    &self.torrent_source,
-                    &self.peer_id,
-                    self.port,
-                )?))
+                (event_callback.clone())(UdpQueryEvent::Announce);
+                let (peers, interval) =
+                    udp_connection.annouce(&self.torrent_source, &self.peer_id, self.port)?;
+                (event_callback.clone())(UdpQueryEvent::AnnounceResponse(PeerAnnounceResponse {
+                    interval,
+                    peers: peers.clone(),
+                }));
+                Ok(Some((peers, interval)))
             }
             _ => Ok(None),
         }
@@ -151,7 +237,7 @@ impl Tracker {
     }
 }
 
-impl Iterator for Tracker {
+impl<F: Fn(Event) + Send + Clone> Iterator for Tracker<F> {
     type Item = (SocketAddr, ControlFlow<Duration, ()>);
 
     fn next(&mut self) -> Option<Self::Item> {

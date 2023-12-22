@@ -10,8 +10,13 @@ pub mod message;
 pub mod tcp;
 pub mod utp;
 
-pub trait PeerConnection {
-    type Error: error::Error;
+#[derive(Clone, Debug)]
+pub enum Event {
+    Start,
+}
+
+pub trait PeerConnection<F> where F: Fn(Event) + Send + Clone {
+    type Error: error::Error + Clone;
 
     fn new(
         peer: SocketAddr,
@@ -20,6 +25,7 @@ pub trait PeerConnection {
         port: u16,
         verbose: bool,
         killswitch: Arc<AtomicBool>,
+        event_callback: F,
     ) -> Result<Self, Self::Error>
     where
         Self: Sized;

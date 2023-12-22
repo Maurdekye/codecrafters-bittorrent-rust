@@ -5,7 +5,7 @@ use crate::{
     error::BitTorrentError,
     peer::message::Codec,
 };
-use std::net::{SocketAddr, SocketAddrV4};
+use std::{net::{SocketAddr, SocketAddrV4}, time::Duration};
 
 pub mod dht;
 pub mod multimodal;
@@ -13,7 +13,7 @@ pub mod multimodal;
 #[derive(Debug)]
 pub enum TrackerResponse {
     Success {
-        interval: Number,
+        interval: Duration,
         peers: Vec<SocketAddr>,
     },
     Failure {
@@ -29,6 +29,8 @@ impl From<BencodedValue> for Result<TrackerResponse, BitTorrentError> {
                     interval: response
                         .pull(b"interval")
                         .and_then(BencodedValue::into_int)
+                        .map(|x| x as u64)
+                        .map(Duration::from_secs)
                         .ok_or(bterror!("Interval missing"))?,
                     peers: <Vec<SocketAddr>>::decode(&mut &peers[..])?,
                 })

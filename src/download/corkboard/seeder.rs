@@ -28,12 +28,18 @@ use super::{Config, Corkboard, Piece, PieceState};
 /// time in between non-blocking tcp listener requests
 const INTERVAL: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Debug)]
+pub enum Event {
+    Start,
+}
+
 /// Seeder thread: allows incoming peer connections and feeds torrent data back to them
 pub fn seeder(
     corkboard: Arc<RwLock<Corkboard>>,
     alarm: Receiver<()>,
     meta_info: MetaInfo,
     config: Config,
+    event_callback: impl Fn(Event) + Send + Clone,
 ) -> Result<(), BitTorrentError> {
     let log = |msg: String| {
         if config.verbose {

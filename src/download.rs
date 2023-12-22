@@ -5,7 +5,7 @@ use std::thread;
 
 use anyhow::Context;
 
-use crate::peer::PeerConnection;
+use crate::peer::{PeerConnection, self};
 use crate::torrent_source::TorrentSource;
 use crate::tracker::multimodal::Tracker;
 use crate::{bterror, error::BitTorrentError, info::MetaInfo};
@@ -14,7 +14,7 @@ pub mod corkboard;
 
 /// Download piece `piece_id` of the file from the torrent associated with the `meta_info` object passed.
 /// Returns a byte vector containing the piece data.
-pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
+pub fn download_piece_from_peer<F: Fn(peer::Event) + Send + Clone, T: PeerConnection<F, Error = BitTorrentError>>(
     meta_info: MetaInfo,
     piece_id: u32,
     peer_id: &str,
@@ -24,6 +24,7 @@ pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
         TorrentSource::File(meta_info.clone()),
         peer_id.to_string(),
         port,
+        &|_| {},
     )?;
     let (peers, _) = tracker.query().unwrap();
     let peer = peers.get(0).ok_or(bterror!("Tracker has no peers"))?;
@@ -34,13 +35,14 @@ pub fn download_piece_from_peer<T: PeerConnection<Error = BitTorrentError>>(
         port,
         false,
         Arc::new(AtomicBool::new(false)),
+        &|_| {},
     )?;
     connection.download_piece(piece_id)
 }
 
 /// Download the full file from the torrent associated with the `meta_info` object passed.
 /// Returns a byte vector containing the file data.
-pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
+pub fn download_file<F: Fn(peer::Event) + Send + Clone, T: PeerConnection<F, Error = BitTorrentError>>(
     meta_info: MetaInfo,
     peer_id: &str,
     port: u16,
@@ -49,6 +51,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
         TorrentSource::File(meta_info.clone()),
         peer_id.to_string(),
         port,
+        &|_| {},
     )?;
     let (peers, _) = tracker.query().unwrap();
 
@@ -83,6 +86,7 @@ pub fn download_file<T: PeerConnection<Error = BitTorrentError>>(
                 port,
                 false,
                 Arc::new(AtomicBool::new(false)),
+                &|_| {},
             )?;
 
             // wait for messages

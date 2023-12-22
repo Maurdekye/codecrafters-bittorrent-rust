@@ -3,41 +3,30 @@ use std::{
     collections::HashMap,
     fs::create_dir_all,
     net::SocketAddr,
-    ops::ControlFlow,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{channel, RecvTimeoutError},
-        Arc, Mutex, RwLock,
-    },
+    sync::{atomic::AtomicBool, mpsc::channel, Arc, Mutex, RwLock},
     thread::Scope,
-    time::Duration,
 };
 
 use crate::{
     bterror,
     data_proxy::DataProxy,
+    download::corkboard::{metadata_retriever::retrieve_metadata, peer_locator::PeerLocator},
     error::BitTorrentError,
     info::MetaInfo,
     multithread::SyncDoor,
-    peer::PeerConnection,
+    peer::{PeerConnection, self},
     torrent_source::TorrentSource,
     tracker::{dht::Dht, multimodal::Tracker},
     util::timestr,
 };
 
-use crossbeam::channel::unbounded;
-
-mod locator;
+mod metadata_retriever;
 mod monitor;
+mod peer_locator;
 mod seeder;
 mod watchdog;
 mod worker;
-
-/// maximum duration in between tracker queries
-const MAX_INTERVAL: Duration = Duration::from_secs(2 * 60);
-
-const DHT_WORKERS: usize = 64;
 
 pub struct Corkboard {
     pub meta_info: MetaInfo,
@@ -170,13 +159,32 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            workers: 4,
+            workers: 32,
             verbose: false,
             temp_path: Path::new("tmp/in-progress/").to_path_buf(),
             peer_id: "00112233445566778899".to_string(),
             port: 6881,
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum Event {
+    Start,
+    PeerLocator(peer_locator::Event),
+    MetadataRetrieval(metadata_retriever::Event),
+    MetaInfoLocated(MetaInfo),
+    Tracker(crate::tracker::multimodal::Event),
+    Dht(crate::tracker::dht::Event),
+    DownloadInitialized,
+    Seeder(seeder::Event),
+    Watchdog(watchdog::Event),
+    Worker(usize, worker::Event),
+    SubtaskInitialized,
+    WorkersInitialized,
+    DownloadFinished,
+    DataCoallated,
+    Finish,
 }
 
 /// ## Corkboard Download
@@ -188,10 +196,11 @@ impl Default for Config {
 /// fetched. They check it once before performing their download to determine which peer to
 /// connect to and which piece to acquire, and once afterwards to validate and submit their
 /// successful download to the board.
-pub fn corkboard_download<'a, T: PeerConnection>(
+pub fn corkboard_download<'a, F: Fn(peer::Event) + Send + Clone, T: PeerConnection<F>>(
     torrent_source: TorrentSource,
-    scope: &'a Scope<'a, '_>,
+    download_scope: &'a Scope<'a, '_>,
     config: Config,
+    event_callback: impl Fn(Event) + Send + Clone + 'a,
 ) -> Result<(DataProxy, MetaInfo), BitTorrentError> {
     let verbose = config.verbose.clone();
     let log = move |msg: String| {
@@ -200,147 +209,72 @@ pub fn corkboard_download<'a, T: PeerConnection>(
         }
     };
 
-    let tracker = Tracker::new(torrent_source.clone(), config.peer_id.clone(), config.port)?;
+    event_callback(Event::Start);
 
-    let (peer_send, peer_recv) = unbounded();
-
-    let dht_killswitch = Arc::new(AtomicBool::new(false));
-    let (tracker_notify, tracker_alarm) = channel::<()>();
     let download_finished = Arc::new(SyncDoor::new());
     download_finished.close().unwrap();
 
-    // spawn tracker
-    {
-        let peer_send = peer_send.clone();
-        let alarm = Arc::new(Mutex::new(tracker_alarm));
-        scope.spawn(move || {
-            log(format!("Initializing tracker"));
-            for (new_peer, should_wait) in tracker {
-                log(format!("New peer from tracker: {new_peer}"));
-                peer_send.send(new_peer).unwrap();
-
-                // wait if requested to do so
-                if let ControlFlow::Break(wait_time) = should_wait {
-                    let wait_time = wait_time.min(MAX_INTERVAL);
-                    log(format!("Waiting {}s", wait_time.as_secs()));
-                    if matches!(
-                        alarm.lock().unwrap().recv_timeout(wait_time),
-                        Err(RecvTimeoutError::Disconnected) | Ok(_)
-                    ) {
-                        break;
-                    }
-                }
-            }
-            log(format!("Trackers exhausted"));
-        });
-    }
-
-    // spawn dht
-    {
-        let peer_send = peer_send.clone();
-        let killswitch = dht_killswitch.clone();
-        let mut dht = Dht::new(
+    // initialize peer sources
+    let tracker = {
+        let event_callback = event_callback.clone();
+        Tracker::new(
+            torrent_source.clone(),
+            config.peer_id.clone(),
+            config.port,
+            move |event| event_callback(Event::Tracker(event)),
+        )?
+    };
+    let dht = {
+        let event_callback = event_callback.clone();
+        Dht::new(
             torrent_source.clone(),
             config.peer_id.clone().into(),
             config.verbose,
-        );
-        scope.spawn(move || {
-            log(format!("Initializing DHT"));
-            let dht_peers = dht.initialize(DHT_WORKERS, scope);
-            for peer in dht_peers {
-                // log(format!("New peer from dht: {peer}"));
-                peer_send.send(peer).unwrap();
-                if killswitch.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        });
-    }
+            move |event| event_callback(Event::Dht(event)),
+        )
+    };
+
+    let peer_locator = {
+        let event_callback = event_callback.clone();
+        PeerLocator::new(tracker, dht, download_scope, &config, move |event| {
+            event_callback(Event::PeerLocator(event))
+        })
+    };
 
     // get meta info
     let peer_list = Arc::new(Mutex::new(Vec::new()));
     let meta_info = match torrent_source {
         TorrentSource::File(meta_info) => meta_info,
-        TorrentSource::Magnet(_) => {
+        ref torrent_source @ TorrentSource::Magnet(_) => {
             println!("Retrieving metadata");
             log(format!("Retrieving metadata"));
-            let meta_info = Arc::new(RwLock::new(None::<MetaInfo>));
-            let peer_search_killswitch = Arc::new(AtomicBool::new(false));
-            let door = Arc::new(SyncDoor::new());
-            door.close().unwrap();
-            for _ in 0..config.workers {
-                let meta_info = meta_info.clone();
-                let peer_recv = peer_recv.clone();
-                let torrent_source = torrent_source.clone();
-                let config = config.clone();
-                let peer_list = peer_list.clone();
-                let peer_search_killswitch = peer_search_killswitch.clone();
-                let door = door.clone();
-                scope.spawn(move || {
-                    for peer in peer_recv {
-                        {
-                            if meta_info.read().unwrap().is_some() {
-                                break;
-                            }
-                        }
-                        log(format!("[{}] Connecting to peer", peer));
-                        let peer_search_killswitch = peer_search_killswitch.clone();
-                        let found_meta_info: MetaInfo = match T::new(
-                            peer,
-                            torrent_source.clone(),
-                            config.peer_id.clone(),
-                            config.port,
-                            config.verbose,
-                            peer_search_killswitch.clone(),
-                        ) {
-                            Ok(peer_connection) => peer_connection
-                                .meta_info()
-                                .expect("Meta info was not included")
-                                .clone(),
-                            Err(err) => {
-                                log(format!("[{}] Failed to connect to peer: {}", peer, err));
-                                continue;
-                            }
-                        };
-                        log(format!("[{}] Metadata located from peer", peer));
-                        peer_list.lock().unwrap().push(peer);
-                        {
-                            if meta_info.read().unwrap().is_some() {
-                                break;
-                            } else {
-                                meta_info.write().unwrap().replace(found_meta_info);
-                                door.open().unwrap();
-                            }
-                        }
-                    }
-                    peer_search_killswitch.store(true, Ordering::Relaxed);
-                    log(format!("Exiting"));
-                });
-            }
-            door.wait().unwrap();
-            let meta_info = meta_info
-                .read()
-                .unwrap()
-                .clone()
-                .expect("Meta info was not located");
-            meta_info
+            let event_callback = event_callback.clone();
+            retrieve_metadata::<T>(
+                torrent_source.clone(),
+                peer_locator.clone(),
+                download_scope,
+                &config,
+                move |event| event_callback(Event::MetadataRetrieval(event)),
+            )?
         }
     };
 
+    event_callback(Event::MetaInfoLocated(meta_info.clone()));
+
     // create corkboard
     log(format!("Initializing Corkboard"));
-    let corkboard: Arc<RwLock<Corkboard>> =
-        Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
+    let corkboard = Arc::new(RwLock::new(Corkboard::new(meta_info.clone())?));
     if let Ok(mut board) = corkboard.write() {
         board.peers.extend(
             peer_list
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|peer| (peer.clone(), Peer::new())),
+                .map(|peer: &SocketAddr| (peer.clone(), Peer::new())),
         );
     }
 
+    event_callback(Event::DownloadInitialized);
     println!("Downloading {}", meta_info.info.name);
     log(format!(
         "Preparing to download {} pieces",
@@ -349,19 +283,41 @@ pub fn corkboard_download<'a, T: PeerConnection>(
 
     // spawn subtasks
     log(format!("Starting subtasks"));
-    let tasks = [monitor::monitor, seeder::seeder].map(|task| {
+    let mut tasks = Vec::new();
+    {
         let corkboard = corkboard.clone();
         let (notify, alarm) = channel();
         let meta_info = meta_info.clone();
         let config = config.clone();
-        scope.spawn(move || task(corkboard, alarm, meta_info, config));
-        notify
-    });
+        let event_callback = event_callback.clone();
+        download_scope.spawn(move || {
+            seeder::seeder(corkboard, alarm, meta_info, config, move |event| {
+                event_callback(Event::Seeder(event))
+            })
+        });
+        tasks.push(notify);
+    }
+    {
+        let corkboard = corkboard.clone();
+        let (notify, alarm) = channel();
+        let meta_info = meta_info.clone();
+        let config = config.clone();
+        download_scope.spawn(move || monitor::monitor(corkboard, alarm, meta_info, config));
+        tasks.push(notify);
+    }
     {
         let corkboard = corkboard.clone();
         let config = config.clone();
-        scope.spawn(move || watchdog::watchdog(corkboard, peer_recv, config));
+        let peer_recv = peer_locator.receiver.clone();
+        let event_callback = event_callback.clone();
+        download_scope.spawn(move || {
+            watchdog::watchdog(corkboard, peer_recv, config, move |event| {
+                event_callback(Event::Watchdog(event))
+            })
+        });
     }
+
+    event_callback(Event::SubtaskInitialized);
 
     // start workers
     log(format!("Starting workers"));
@@ -370,14 +326,26 @@ pub fn corkboard_download<'a, T: PeerConnection>(
         let meta_info = meta_info.clone();
         let download_finished = download_finished.clone();
         let config = config.clone();
-        scope.spawn(move || {
-            worker::worker::<T>(corkboard, worker_id, meta_info, download_finished, config)
+        let event_callback = event_callback.clone();
+        download_scope.spawn(move || {
+            worker::worker::<T>(
+                corkboard,
+                worker_id,
+                meta_info,
+                download_finished,
+                config,
+                move |event| event_callback(Event::Worker(worker_id, event)),
+            )
         });
     }
+
+    event_callback(Event::WorkersInitialized);
 
     // wait for workers to finish
     log(format!("Waiting for workers to finish"));
     download_finished.wait().unwrap();
+
+    event_callback(Event::DownloadFinished);
 
     println!("Finished downloading");
 
@@ -386,8 +354,7 @@ pub fn corkboard_download<'a, T: PeerConnection>(
     for alarm in tasks {
         alarm.send(()).unwrap();
     }
-    tracker_notify.send(()).unwrap_or_default();
-    dht_killswitch.store(true, Ordering::Relaxed);
+    peer_locator.kill();
 
     // coallate data
     log(format!("Coallating data"));
@@ -403,6 +370,9 @@ pub fn corkboard_download<'a, T: PeerConnection>(
         .collect::<Result<Vec<PieceLocation>, _>>()?;
 
     let proxy = DataProxy::new(data, meta_info.info.piece_length, meta_info.length());
+
+    event_callback(Event::DataCoallated);
+    event_callback(Event::Finish);
 
     log(format!("Done"));
 
